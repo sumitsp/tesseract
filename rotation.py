@@ -246,9 +246,9 @@ def measure_skew_deg(gray_small: np.ndarray) -> float:
     if lines is None:
         return 0.0
     angles = []
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+    # OpenCV may return (N, 1, 4) or (N, 4); reshape so unpacking always works.
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        angle = math.degrees(math.atan2(int(y2) - int(y1), int(x2) - int(x1)))
         if abs(angle) <= 30:
             angles.append(angle)
         elif abs(angle) >= 150:
