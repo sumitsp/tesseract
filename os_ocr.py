@@ -2,6 +2,9 @@
 Convert JPGs to structured DoclingDocuments using Docling's layout/table/reading-order
 pipeline with RapidOCR (local model files) as the OCR engine.
 
+Reads chart folders/images from Azure Blob Storage (same path style as file_counter.py),
+downloads each image locally for OCR, then writes results under OUTPUT_DIR.
+
 For every image, produces:
   - Markdown with real heading hierarchy (# / ##) and proper pipe tables,
     driven by Docling's layout + table-structure (TableFormer) models.
@@ -18,9 +21,12 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient, ContainerClient
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
@@ -30,13 +36,20 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, ImageFormatOption
 from rapidocr.utils.typings import EngineType
 
-INPUT_DIR = Path(r"\\ADMPDNLP06\AI_Vendor\Run1\Batch2\DEID_PNGs")
+# ============================================================
+# AZURE CONFIGURATION (same style as file_counter.py)
+# ============================================================
+
+STORAGE_ACCOUNT = "azsadve2aipoc"
+CONTAINER_NAME = "YOUR_CONTAINER_NAME"
+PREFIX = "Run1/Batch1/DEID_PNGs/"
+
 OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text")
 MODELS_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\rapidocr_models")
 # OCR starts at this folder, then continues with later folders.
 # Use only the folder name, not the full path.
 START_FROM = "65214568_55368341"
-JPG_SUFFIXES = {".jpg", ".jpeg", ".JPG", ".JPEG"}
+JPG_SUFFIXES = {".jpg", ".jpeg"}
 DET_MODEL = MODELS_DIR / "PP-OCRv6_det_small.pth"
 REC_MODEL = MODELS_DIR / "PP-OCRv6_rec_small.pth"
 CLS_MODEL = MODELS_DIR / "ch_ptocr_mobile_v2.0_cls_mobile.pth"
@@ -57,6 +70,87 @@ RAPIDOCR_PARAMS = {
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def connect_azure() -> ContainerClient:
+    log("Connecting to Azure Blob Storage...")
+    account_url = f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
+    try:
+        credential = DefaultAzureCredential()
+        blob_service_client = BlobServiceClient(
+            account_url=account_url,
+            credential=credential,
+        )
+        container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+        log("Azure connection created.")
+        return container_client
+    except Exception as exc:
+        raise SystemExit(f"ERROR connecting to Azure:\n{exc}") from exc
+
+
+def list_folder_blobs(container_client: ContainerClient) -> dict[str, list[str]]:
+    """Group image blob names by immediate folder under PREFIX."""
+    log("=" * 70)
+    log("Scanning Azure Blob")
+    log("=" * 70)
+    log(f"Storage Account : {STORAGE_ACCOUNT}")
+    log(f"Container       : {CONTAINER_NAME}")
+    log(f"Prefix          : {PREFIX}")
+    log("=" * 70)
+
+    folder_blobs: dict[str, list[str]] = {}
+    try:
+        blobs = container_client.list_blobs(name_starts_with=PREFIX)
+        for blob in blobs:
+            relative_path = blob.name[len(PREFIX) :]
+            parts = relative_path.split("/")
+            if len(parts) < 2:
+                continue
+            folder_name = parts[0]
+            filename = parts[-1]
+            if Path(filename).suffix.lower() not in JPG_SUFFIXES:
+                continue
+            folder_blobs.setdefault(folder_name, []).append(blob.name)
+    except Exception as exc:
+        raise SystemExit(f"ERROR while reading blobs:\n{exc}") from exc
+
+    return folder_blobs
+
+
+def list_chart_folders(folder_blobs: dict[str, list[str]]) -> list[str]:
+    folders = sorted(folder_blobs.keys(), key=lambda name: name.lower())
+    if not START_FROM:
+        return folders
+    start_index = next(
+        (i for i, folder in enumerate(folders) if folder == START_FROM),
+        None,
+    )
+    if start_index is None:
+        raise SystemExit(f"START_FROM folder not found under prefix: {START_FROM}")
+    log(f"Starting OCR at {START_FROM}; skipping {start_index} earlier folder(s)")
+    return folders[start_index:]
+
+
+def jpg_sort_key(blob_name: str) -> tuple:
+    stem = Path(blob_name).stem
+    return (0, int(stem)) if stem.isdigit() else (1, stem.lower())
+
+
+def list_jpgs(folder_blobs: dict[str, list[str]], folder_name: str) -> list[str]:
+    images = list(folder_blobs.get(folder_name, []))
+    images.sort(key=jpg_sort_key)
+    return images
+
+
+def download_blob(
+    container_client: ContainerClient,
+    blob_name: str,
+    dest: Path,
+) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data = container_client.download_blob(blob_name).readall()
+    dest.write_bytes(data)
+    return dest
 
 
 def require_model_files() -> None:
@@ -144,72 +238,37 @@ def convert_image(converter: DocumentConverter, image_path: Path) -> tuple[str, 
     return doc.export_to_markdown(), doc.export_to_dict()
 
 
-def jpg_sort_key(path: Path) -> tuple:
-    stem = path.stem
-    return (0, int(stem)) if stem.isdigit() else (1, stem.lower())
-
-
-def list_chart_folders(input_dir: Path) -> list[Path]:
-    try:
-        folders = sorted(
-            (entry for entry in input_dir.iterdir() if entry.is_dir()),
-            key=lambda path: path.name,
-        )
-    except Exception as exc:
-        raise SystemExit(
-            "Cannot read the network path. Check the share, VPN, and folder name.\n"
-            f"  {input_dir}\n"
-            f"  {type(exc).__name__}: {exc}"
-        )
-    if not START_FROM:
-        return folders
-    start_index = next(
-        (i for i, folder in enumerate(folders) if folder.name == START_FROM),
-        None,
-    )
-    if start_index is None:
-        raise SystemExit(f"START_FROM folder not found under input: {START_FROM}")
-    log(f"Starting OCR at {START_FROM}; skipping {start_index} earlier folder(s)")
-    return folders[start_index:]
-
-
-def list_jpgs(folder: Path) -> list[Path]:
-    images = [
-        path
-        for path in folder.iterdir()
-        if path.is_file() and path.suffix in JPG_SUFFIXES
-    ]
-    images.sort(key=jpg_sort_key)
-    return images
-
-
 def process_folder(
     converter: DocumentConverter,
-    input_dir: Path,
+    container_client: ContainerClient,
     output_dir: Path,
-    folder: Path,
-    images: list[Path],
+    folder_name: str,
+    blob_names: list[str],
 ) -> None:
-    out_folder = output_dir / folder.relative_to(input_dir)
+    out_folder = output_dir / folder_name
     out_folder.mkdir(parents=True, exist_ok=True)
-    out_file = out_folder / f"{folder.name}.json"
-    log(f"  {len(images)} images -> {out_file}")
+    out_file = out_folder / f"{folder_name}.json"
+    log(f"  {len(blob_names)} images -> {out_file}")
 
     pages: dict[str, dict] = {}
-    for image_path in images:
-        log(f"  {image_path.name}")
-        try:
-            markdown, doc_dict = convert_image(converter, image_path)
-            pages[image_path.name] = {"markdown": markdown or "[no text detected]", "document": doc_dict}
-        except Exception as exc:
-            pages[image_path.name] = {
-                "markdown": f"[ERROR extracting {image_path.name}: {exc}]",
-                "document": None,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+    with tempfile.TemporaryDirectory(prefix=f"os_ocr_{folder_name}_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        for blob_name in blob_names:
+            filename = Path(blob_name).name
+            log(f"  {filename}")
+            try:
+                local_path = download_blob(container_client, blob_name, tmp_path / filename)
+                markdown, doc_dict = convert_image(converter, local_path)
+                pages[filename] = {"markdown": markdown or "[no text detected]", "document": doc_dict}
+            except Exception as exc:
+                pages[filename] = {
+                    "markdown": f"[ERROR extracting {filename}: {exc}]",
+                    "document": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
 
-        out_file.write_text(json.dumps(pages, indent=2, default=str), encoding="utf-8")
-        log(f"  saved {out_file}")
+            out_file.write_text(json.dumps(pages, indent=2, default=str), encoding="utf-8")
+            log(f"  saved {out_file}")
 
     log(f"Finished {out_file}")
 
@@ -218,30 +277,30 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     log("=== DOCLING + RAPIDOCR (local models) ===")
-    input_dir = INPUT_DIR
     output_dir = OUTPUT_DIR
-    log(f"INPUT:  {input_dir}")
+    log(f"INPUT:  azure://{STORAGE_ACCOUNT}/{CONTAINER_NAME}/{PREFIX}")
     log(f"OUTPUT: {output_dir}")
     log(f"START_FROM: {START_FROM or '(first folder)'}")
-    if not input_dir.is_dir():
-        raise SystemExit(
-            "Input folder does not exist or the network share is not reachable:\n"
-            f"  {input_dir}\n"
-            "If File Explorer shows 'Batch1' with no space, remove the space in the path."
-        )
-    chart_folders = list_chart_folders(input_dir)
+
+    container_client = connect_azure()
+    folder_blobs = list_folder_blobs(container_client)
+    chart_folders = list_chart_folders(folder_blobs)
     if not chart_folders:
-        raise SystemExit(f"No chart folders found under: {input_dir}")
+        raise SystemExit(
+            "No chart folders / JPG blobs found.\n"
+            "Check CONTAINER_NAME, PREFIX, and blob folder structure."
+        )
+
     log("Loading Docling + RapidOCR from local models...")
     converter = build_converter()
     output_dir.mkdir(parents=True, exist_ok=True)
-    for folder in chart_folders:
-        images = list_jpgs(folder)
+    for folder_name in chart_folders:
+        images = list_jpgs(folder_blobs, folder_name)
         if not images:
-            log(f"Folder: {folder.name} (no JPGs, skipped)")
+            log(f"Folder: {folder_name} (no JPGs, skipped)")
             continue
-        log(f"Folder: {folder}")
-        process_folder(converter, input_dir, output_dir, folder, images)
+        log(f"Folder: {folder_name}")
+        process_folder(converter, container_client, output_dir, folder_name, images)
 
 
 if __name__ == "__main__":
