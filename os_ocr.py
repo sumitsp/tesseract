@@ -20,10 +20,17 @@ on top of it.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# Docling still downloads layout/TableFormer models from HuggingFace.
+# hf-xet's CAS client often fails with:
+#   "CAS Client Error: ... error decoding response body, domain: no-url"
+# Disable XET so huggingface_hub falls back to normal HTTP downloads.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContainerClient
