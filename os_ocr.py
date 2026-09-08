@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +32,15 @@ from typing import Any
 #   "CAS Client Error: ... error decoding response body, domain: no-url"
 # Disable XET so huggingface_hub falls back to normal HTTP downloads.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
+# Prefer Windows/OS certificate store (helps with corp SSL inspection).
+# Install once in the venv:  python -m pip install truststore
+try:
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContainerClient
@@ -50,6 +60,12 @@ from rapidocr.utils.typings import EngineType
 STORAGE_ACCOUNT = "azsadve2aipoc"
 CONTAINER_NAME = "YOUR_CONTAINER_NAME"
 PREFIX = "Run1/Batch1/DEID_PNGs/"
+
+# Corp networks often intercept HTTPS. If you still get
+# CERTIFICATE_VERIFY_FAILED downloading Docling models, leave this True.
+# Prefer installing truststore (above) or pointing SSL_CERT_FILE / REQUESTS_CA_BUNDLE
+# at your company root CA when possible.
+ALLOW_INSECURE_HF_SSL = True
 
 OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text")
 MODELS_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\rapidocr_models")
@@ -77,6 +93,55 @@ RAPIDOCR_PARAMS = {
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def configure_ssl_for_model_downloads() -> None:
+    """Work around corp SSL inspection blocking HuggingFace/Docling model downloads."""
+    if not ALLOW_INSECURE_HF_SSL:
+        return
+
+    ssl._create_default_https_context = ssl._create_unverified_context
+    try:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+
+    try:
+        import requests
+        from huggingface_hub import configure_http_backend
+
+        def _backend_factory() -> requests.Session:
+            session = requests.Session()
+            session.verify = False
+            return session
+
+        configure_http_backend(backend_factory=_backend_factory)
+    except Exception as exc:
+        log(f"Could not configure HuggingFace insecure SSL backend: {exc}")
+
+    # Docling / newer HF stacks may use httpx (ConnectError comes from here).
+    try:
+        import httpx
+
+        _orig_client_init = httpx.Client.__init__
+        _orig_async_init = httpx.AsyncClient.__init__
+
+        def _client_init(self, *args: Any, **kwargs: Any) -> None:
+            kwargs.setdefault("verify", False)
+            _orig_client_init(self, *args, **kwargs)
+
+        def _async_init(self, *args: Any, **kwargs: Any) -> None:
+            kwargs.setdefault("verify", False)
+            _orig_async_init(self, *args, **kwargs)
+
+        httpx.Client.__init__ = _client_init  # type: ignore[method-assign]
+        httpx.AsyncClient.__init__ = _async_init  # type: ignore[method-assign]
+    except Exception as exc:
+        log(f"Could not patch httpx SSL verify: {exc}")
+
+    log("WARNING: SSL verification disabled for model downloads (ALLOW_INSECURE_HF_SSL=True)")
 
 
 def connect_azure() -> ContainerClient:
@@ -299,6 +364,7 @@ def main() -> None:
         )
 
     log("Loading Docling + RapidOCR from local models...")
+    configure_ssl_for_model_downloads()
     converter = build_converter()
     output_dir.mkdir(parents=True, exist_ok=True)
     for folder_name in chart_folders:
