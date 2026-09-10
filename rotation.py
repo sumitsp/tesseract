@@ -520,16 +520,25 @@ def detect_rotation(
     ambiguous = False
 
     # A 90/270 call is a strong claim (the page is sideways) and proj/morph
-    # (0.65 combined weight in score_orientation) respond to any long
-    # straight structure, table rule lines included - not just text. Don't
-    # act on a quarter-turn unless the component/line signal (the one
-    # feature actually built from grouped text glyphs) independently backs
-    # it up; otherwise fall back to 0 rather than rotate an upright page.
+    # (0.65 combined weight in score_orientation) can spike from structure
+    # that has nothing to do with reading direction: table rule lines, or -
+    # even on a page with no lines at all - evenly-spaced short tokens
+    # (e.g. narrow label/date/value columns) that happen to project more
+    # sharply once rotated. comp/n_lines (built from grouped text glyphs)
+    # has been the reliable signal in both failure modes seen so far, so a
+    # quarter-turn is only trusted when it clears an absolute evidence
+    # floor AND actually looks more line-organized than the page already
+    # does at 0/180 - not just "organized enough". Otherwise fall back to 0
+    # rather than rotate an already-upright page.
     if best_deg in (90, 270):
         best_details = details[str(best_deg)]
+        upright_lines = max(details["0"]["n_lines"], details["180"]["n_lines"])
+        upright_comp = max(details["0"]["comp"], details["180"]["comp"])
         if (
             best_details["n_lines"] < min_lines_for_quarter_turn
             or best_details["comp"] < min_comp_score_for_quarter_turn
+            or best_details["n_lines"] <= upright_lines
+            or best_details["comp"] <= upright_comp
         ):
             best_deg = 0
             best = scores[0]
