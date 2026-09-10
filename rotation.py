@@ -174,6 +174,32 @@ def remove_tiny_noise(ink: np.ndarray, min_area: int = 12) -> np.ndarray:
     return out
 
 
+def remove_ruling_lines(ink: np.ndarray, min_line_len_frac: float = 0.12) -> np.ndarray:
+    """
+    Strip long straight table/form rule lines from the ink mask.
+
+    Form-heavy scans (intake tables, grids) are dominated by straight
+    horizontal/vertical borders, not glyphs. Left in, those lines swamp the
+    orientation heuristics below (_projection_score, _morphology_score),
+    which read "which axis has more/longer straight structure" - on a
+    grid-heavy page that answers "which way do the table lines run", not
+    "which way does the text run", and can flip an already-upright page.
+    Glyph strokes are short and irregular, so a wide opening kernel isolates
+    rule lines specifically and leaves text-like ink untouched.
+    """
+    h, w = ink.shape
+    h_len = max(15, int(w * min_line_len_frac))
+    v_len = max(15, int(h * min_line_len_frac))
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len))
+    h_lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, v_kernel)
+    # Dilate so the full line width is removed, not just its 1px-wide open core.
+    grow = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    lines = cv2.dilate(cv2.bitwise_or(h_lines, v_lines), grow, iterations=1)
+    return cv2.bitwise_and(ink, cv2.bitwise_not(lines))
+
+
 def preprocess(image: np.ndarray, analysis_max_dimension: int = 1800) -> PreprocessBundle:
     gray_full = to_gray(image)
     gray, scale = resize_for_analysis(gray_full, analysis_max_dimension)
@@ -183,7 +209,8 @@ def preprocess(image: np.ndarray, analysis_max_dimension: int = 1800) -> Preproc
     ink_b = _ink_from_otsu(clahe)
     ink = combine_ink_masks(ink_a, ink_b)
     ink_borderless = remove_page_borders(ink)
-    ink_clean = remove_tiny_noise(ink_borderless, min_area=10)
+    ink_deruled = remove_ruling_lines(ink_borderless)
+    ink_clean = remove_tiny_noise(ink_deruled, min_area=10)
     h, w = gray.shape
     return PreprocessBundle(
         gray=gray,
@@ -470,6 +497,8 @@ def detect_rotation(
     gray: np.ndarray,
     *,
     close_ratio: float = 1.08,
+    min_lines_for_quarter_turn: int = 3,
+    min_comp_score_for_quarter_turn: float = 0.15,
 ) -> tuple[int, float, bool, dict[str, Any]]:
     """
     Returns (rotation_deg, confidence, ambiguous_0_180, diagnostics).
@@ -489,6 +518,23 @@ def detect_rotation(
     conf = float(np.clip(0.35 + 2.0 * sep + 0.01 * min(evidence, 40), 0.0, 1.0))
 
     ambiguous = False
+
+    # A 90/270 call is a strong claim (the page is sideways) and proj/morph
+    # (0.65 combined weight in score_orientation) respond to any long
+    # straight structure, table rule lines included - not just text. Don't
+    # act on a quarter-turn unless the component/line signal (the one
+    # feature actually built from grouped text glyphs) independently backs
+    # it up; otherwise fall back to 0 rather than rotate an upright page.
+    if best_deg in (90, 270):
+        best_details = details[str(best_deg)]
+        if (
+            best_details["n_lines"] < min_lines_for_quarter_turn
+            or best_details["comp"] < min_comp_score_for_quarter_turn
+        ):
+            best_deg = 0
+            best = scores[0]
+            conf = min(conf, 0.45)
+            ambiguous = True
     # Special handling: 0 vs 180 near-tie.
     s0, s180 = scores[0], scores[180]
     if max(s0, s180) > 0 and min(s0, s180) / (max(s0, s180) + 1e-9) > 0.92:
