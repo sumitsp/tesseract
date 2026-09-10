@@ -1,41 +1,30 @@
 """
-Detect and correct skew (tilt), 90/180/270 rotation, and horizontal mirroring
-in scanned JPGs using OpenCV + Tesseract OSD, then write:
-  - one CSV row per image with the measured/applied correction values
-  - a corrected copy of every image under OUTPUT_DIR, same folder structure as input
+Detect and correct page rotation (0/90/180/270) and horizontal mirroring
+using OpenCV only (no Tesseract).
 
-Reads chart folders/images from Azure Blob Storage (same path style as file_counter.py),
-downloads each image locally for processing, then writes corrected copies under OUTPUT_DIR.
+Also measures tilt (skew). Tilt is corrected only when |tilt| <= 5 degrees.
+If |tilt| > 5 degrees, tilt is reported but NOT corrected (rotation + mirror
+still applied).
 
-Pipeline per image (each step is applied to the full-resolution image; detection
-itself runs on a downscaled copy for speed):
-  1. Tilt   - Hough line transform on text-line edges -> small-angle deskew.
-  2. Rotate - Tesseract OSD on the deskewed image -> 0/90/180/270 correction.
-  3. Mirror - OCR word-count/confidence compared normal vs. horizontally flipped
-              on the now-upright image; whichever scores better is kept.
-
-CSV "*_deg" columns are the degrees rotated CLOCKWISE that were actually applied
-to correct the image (not the raw measured tilt of the original).
+Writes:
+  - CSV with tilt_angle_deg, rotation_deg, mirrored (Yes/No)
+  - corrected images under OUTPUT_DIR
 """
 from __future__ import annotations
 
 import csv
 import math
-import shutil
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import cv2
 import numpy as np
-import pytesseract
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContainerClient
-from pytesseract import Output
 
 # ============================================================
-# AZURE CONFIGURATION (same style as file_counter.py)
+# AZURE CONFIGURATION
 # ============================================================
 
 STORAGE_ACCOUNT = "azsadve2aipoc"
@@ -44,26 +33,25 @@ PREFIX = "Run1/Batch1/DEID_PNGs/"
 
 OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\corrected_images")
 CSV_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\rotation_report.csv")
-# Optional override. Leave as None to auto-detect common install paths + PATH.
-# Only set this if auto-detect fails on that machine, e.g.:
-#   TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-TESSERACT_CMD: str | None = None
-# OCR/rotation start at this folder, then continues with later folders.
-# Use only the folder name, not the full path.
 START_FROM = ""
 JPG_SUFFIXES = {".jpg", ".jpeg"}
 
-DETECT_MAX_DIM = 1600       # downscale target (longest side, px) used only for detection
-SKEW_MIN_DEG = 0.1          # ignore measured tilt smaller than this (noise)
-SKEW_MAX_DEG = 30.0         # ignore measured tilt larger than this (Hough noise, not real skew)
-MIN_MIRROR_WORDS = 3        # need at least this many OCR'd words on one side to trust the mirror check
+DETECT_MAX_DIM = 1200
+TILT_CORRECT_MAX_DEG = 5.0   # correct tilt only if |tilt| <= this; else leave tilt alone
+TILT_MIN_DEG = 0.5           # ignore tiny noise below this
+ROTATION_MARGIN = 1.15       # best orientation score must beat 2nd-best by this factor
+MIRROR_MARGIN = 1.20         # flipped margin score must clearly beat normal to flip
 
 CSV_FIELDS = [
-    "folder", "filename",
-    "skew_angle_deg", "rotation_deg", "rotation_confidence",
-    "mirrored", "mirror_words_normal", "mirror_conf_normal",
-    "mirror_words_flipped", "mirror_conf_flipped",
-    "status", "error", "output_path",
+    "folder",
+    "filename",
+    "tilt_angle_deg",
+    "tilt_corrected",
+    "rotation_deg",
+    "mirrored",
+    "status",
+    "error",
+    "output_path",
 ]
 
 
@@ -88,7 +76,6 @@ def connect_azure() -> ContainerClient:
 
 
 def list_folder_blobs(container_client: ContainerClient) -> dict[str, list[str]]:
-    """Group image blob names by immediate folder under PREFIX."""
     log("=" * 70)
     log("Scanning Azure Blob")
     log("=" * 70)
@@ -99,8 +86,7 @@ def list_folder_blobs(container_client: ContainerClient) -> dict[str, list[str]]
 
     folder_blobs: dict[str, list[str]] = {}
     try:
-        blobs = container_client.list_blobs(name_starts_with=PREFIX)
-        for blob in blobs:
+        for blob in container_client.list_blobs(name_starts_with=PREFIX):
             relative_path = blob.name[len(PREFIX) :]
             parts = relative_path.split("/")
             if len(parts) < 2:
@@ -112,7 +98,6 @@ def list_folder_blobs(container_client: ContainerClient) -> dict[str, list[str]]
             folder_blobs.setdefault(folder_name, []).append(blob.name)
     except Exception as exc:
         raise SystemExit(f"ERROR while reading blobs:\n{exc}") from exc
-
     return folder_blobs
 
 
@@ -120,10 +105,7 @@ def list_chart_folders(folder_blobs: dict[str, list[str]]) -> list[str]:
     folders = sorted(folder_blobs.keys(), key=lambda name: name.lower())
     if not START_FROM:
         return folders
-    start_index = next(
-        (i for i, folder in enumerate(folders) if folder == START_FROM),
-        None,
-    )
+    start_index = next((i for i, f in enumerate(folders) if f == START_FROM), None)
     if start_index is None:
         raise SystemExit(f"START_FROM folder not found under prefix: {START_FROM}")
     log(f"Starting at {START_FROM}; skipping {start_index} earlier folder(s)")
@@ -141,70 +123,10 @@ def list_jpgs(folder_blobs: dict[str, list[str]], folder_name: str) -> list[str]
     return images
 
 
-def download_blob(
-    container_client: ContainerClient,
-    blob_name: str,
-    dest: Path,
-) -> Path:
+def download_blob(container_client: ContainerClient, blob_name: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    data = container_client.download_blob(blob_name).readall()
-    dest.write_bytes(data)
+    dest.write_bytes(container_client.download_blob(blob_name).readall())
     return dest
-
-
-def find_tesseract() -> Path:
-    """Locate tesseract.exe on this machine (override, common paths, then PATH)."""
-    candidates: list[Path] = []
-    if TESSERACT_CMD:
-        candidates.append(Path(TESSERACT_CMD))
-    candidates.extend(
-        [
-            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-            Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
-            Path.home() / r"AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
-        ]
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    which = shutil.which("tesseract")
-    if which:
-        return Path(which)
-    tried = "\n".join(f"  - {path}" for path in candidates)
-    raise SystemExit(
-        "Tesseract OCR engine is not installed on this machine "
-        "(pytesseract alone is not enough).\n"
-        "Install the Windows binary, then reopen PowerShell:\n"
-        "  https://github.com/UB-Mannheim/tesseract/wiki\n"
-        "During setup, tick 'Add to PATH'. Verify with:\n"
-        "  tesseract --version\n"
-        "If installed elsewhere, set TESSERACT_CMD in rotation.py to that tesseract.exe.\n"
-        f"Checked:\n{tried}"
-    )
-
-
-def require_tesseract() -> None:
-    cmd = find_tesseract()
-    pytesseract.pytesseract.tesseract_cmd = str(cmd)
-    log(f"Using Tesseract: {cmd}")
-
-    # First launch on a machine can spuriously fail (Defender/SmartScreen).
-    last_exc: Exception | None = None
-    for attempt in range(1, 4):
-        try:
-            version = pytesseract.get_tesseract_version()
-            log(f"Tesseract version: {version}")
-            return
-        except Exception as exc:
-            last_exc = exc
-            log(f"  Tesseract check attempt {attempt}/3 failed: {type(exc).__name__}: {exc}")
-            time.sleep(2)
-
-    raise SystemExit(
-        "Found tesseract.exe but it is not runnable.\n"
-        f"  {cmd}\n"
-        f"  {type(last_exc).__name__}: {last_exc}"
-    )
 
 
 def downscale(image: np.ndarray, max_dim: int = DETECT_MAX_DIM) -> np.ndarray:
@@ -215,116 +137,213 @@ def downscale(image: np.ndarray, max_dim: int = DETECT_MAX_DIM) -> np.ndarray:
     return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+def to_gray(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        return image
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+
+def binary_ink(gray: np.ndarray) -> np.ndarray:
+    """Dark text -> white ink mask on black background."""
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    thr = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 15
+    )
+    return thr
+
+
 def rotate_bound_cw(image: np.ndarray, angle_cw_deg: float) -> np.ndarray:
-    """Rotate `image` by `angle_cw_deg` degrees clockwise, expanding the canvas
-    (white fill) so nothing is cropped."""
     if abs(angle_cw_deg) < 1e-6:
         return image
-    (h, w) = image.shape[:2]
-    (cx, cy) = (w / 2.0, h / 2.0)
+    h, w = image.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
     matrix = cv2.getRotationMatrix2D((cx, cy), -angle_cw_deg, 1.0)
-    cos = abs(matrix[0, 0])
-    sin = abs(matrix[0, 1])
+    cos, sin = abs(matrix[0, 0]), abs(matrix[0, 1])
     new_w = int((h * sin) + (w * cos))
     new_h = int((h * cos) + (w * sin))
     matrix[0, 2] += (new_w / 2.0) - cx
     matrix[1, 2] += (new_h / 2.0) - cy
+    fill = (255, 255, 255) if image.ndim == 3 else 255
     return cv2.warpAffine(
         image, matrix, (new_w, new_h),
-        borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
+        borderMode=cv2.BORDER_CONSTANT, borderValue=fill,
     )
 
 
-def measure_skew_deg(gray_small: np.ndarray) -> float:
-    """Median tilt of near-horizontal text-line edges, as degrees CLOCKWISE
-    needed to correct it (0.0 if nothing usable is found)."""
-    edges = cv2.Canny(gray_small, 50, 150, apertureSize=3)
-    min_len = max(30, gray_small.shape[1] // 4)
+def apply_rotation_cw(image: np.ndarray, rotation_deg: int) -> np.ndarray:
+    rotation_deg = int(rotation_deg) % 360
+    if rotation_deg == 90:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if rotation_deg == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    if rotation_deg == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return image
+
+
+# ---------------------------------------------------------------------------
+# TILT (skew) — conservative Hough on near-horizontal edges only
+# ---------------------------------------------------------------------------
+
+def measure_tilt_deg(gray_small: np.ndarray) -> float:
+    """
+    Measured page tilt in degrees (clockwise-positive of the content).
+    Returns 0.0 if not enough consistent near-horizontal lines.
+    """
+    edges = cv2.Canny(gray_small, 60, 160, apertureSize=3)
+    min_len = max(40, gray_small.shape[1] // 5)
     lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180, threshold=150, minLineLength=min_len, maxLineGap=20
+        edges, 1, np.pi / 180, threshold=120,
+        minLineLength=min_len, maxLineGap=12,
     )
     if lines is None:
         return 0.0
-    angles = []
-    # OpenCV may return (N, 1, 4) or (N, 4); reshape so unpacking always works.
+
+    angles: list[float] = []
     for x1, y1, x2, y2 in lines.reshape(-1, 4):
-        angle = math.degrees(math.atan2(int(y2) - int(y1), int(x2) - int(x1)))
-        if abs(angle) <= 30:
-            angles.append(angle)
-        elif abs(angle) >= 150:
-            angles.append(angle - 180 if angle > 0 else angle + 180)
-    if not angles:
-        return 0.0
-    measured_tilt = float(np.median(angles))  # image-space, clockwise-positive tilt of the text
-    correction = -measured_tilt               # rotate clockwise by this amount to undo it
-    if abs(correction) < SKEW_MIN_DEG or abs(correction) > SKEW_MAX_DEG:
-        return 0.0
-    return correction
-
-
-def measure_rotation(gray: np.ndarray) -> tuple[int, float]:
-    """Returns (degrees clockwise to apply, orientation confidence) from Tesseract OSD."""
-    try:
-        osd = pytesseract.image_to_osd(gray, output_type=Output.DICT)
-    except pytesseract.TesseractError:
-        return 0, 0.0
-    return int(osd.get("rotate", 0)) % 360, float(osd.get("orientation_conf", 0.0))
-
-
-def ocr_quality(gray: np.ndarray) -> tuple[int, float]:
-    """Returns (word_count, mean_confidence) from a plain OCR pass."""
-    data = pytesseract.image_to_data(gray, output_type=Output.DICT)
-    word_count = 0
-    conf_sum = 0.0
-    for text, conf in zip(data["text"], data["conf"]):
-        try:
-            conf_val = float(conf)
-        except (TypeError, ValueError):
+        dx = int(x2) - int(x1)
+        dy = int(y2) - int(y1)
+        if dx == 0:
             continue
-        if conf_val >= 0 and text.strip():
-            word_count += 1
-            conf_sum += conf_val
-    mean_conf = conf_sum / word_count if word_count else 0.0
-    return word_count, mean_conf
+        angle = math.degrees(math.atan2(dy, dx))
+        # Keep only near-horizontal strokes (true text-line tilt), not random edges.
+        if abs(angle) <= 15:
+            angles.append(angle)
+        elif abs(angle) >= 165:
+            angles.append(angle - 180 if angle > 0 else angle + 180)
 
+    if len(angles) < 8:
+        return 0.0
+
+    median = float(np.median(angles))
+    # Require agreement: most lines near the median.
+    close = [a for a in angles if abs(a - median) <= 2.0]
+    if len(close) < max(8, int(0.55 * len(angles))):
+        return 0.0
+
+    if abs(median) < TILT_MIN_DEG:
+        return 0.0
+    return round(median, 2)
+
+
+# ---------------------------------------------------------------------------
+# ROTATION 0/90/180/270 — projection profile scoring (OpenCV only)
+# ---------------------------------------------------------------------------
+
+def _orientation_score(gray: np.ndarray) -> float:
+    """
+    Higher = more likely upright text (strong horizontal text-line structure).
+    Uses row-projection variance of ink + slight preference for content on top half.
+    """
+    ink = binary_ink(gray)
+    # Prefer page with clear horizontal bands of text.
+    row_proj = ink.sum(axis=1).astype(np.float64)
+    if row_proj.sum() < 1:
+        return 0.0
+    row_proj /= row_proj.sum()
+    row_var = float(np.var(row_proj))
+
+    col_proj = ink.sum(axis=0).astype(np.float64)
+    col_proj /= col_proj.sum() + 1e-9
+    col_var = float(np.var(col_proj))
+
+    # Upright text: row variance usually dominates column variance.
+    structure = row_var / (col_var + 1e-12)
+
+    h = ink.shape[0]
+    top = ink[: h // 2].sum()
+    bottom = ink[h // 2 :].sum()
+    # Mild bias: headers / titles often put more ink in upper half when upright.
+    top_bias = 1.0 + 0.05 * ((top - bottom) / (top + bottom + 1e-9))
+
+    return structure * top_bias
+
+
+def measure_rotation_deg(gray_small: np.ndarray) -> int:
+    """
+    Best clockwise rotation in {0,90,180,270}.
+    Stays at 0 unless another orientation clearly wins (avoids random flips).
+    """
+    candidates = {
+        0: gray_small,
+        90: cv2.rotate(gray_small, cv2.ROTATE_90_CLOCKWISE),
+        180: cv2.rotate(gray_small, cv2.ROTATE_180),
+        270: cv2.rotate(gray_small, cv2.ROTATE_90_COUNTERCLOCKWISE),
+    }
+    scores = {deg: _orientation_score(img) for deg, img in candidates.items()}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_deg, best_score = ranked[0]
+    second_score = ranked[1][1]
+
+    if best_deg == 0:
+        return 0
+    if best_score < second_score * ROTATION_MARGIN:
+        return 0
+    # Extra caution on 180: only accept if clearly better than 0.
+    if best_deg == 180 and best_score < scores[0] * (ROTATION_MARGIN + 0.1):
+        return 0
+    return best_deg
+
+
+# ---------------------------------------------------------------------------
+# MIRROR — left-margin whitespace heuristic (OpenCV only, conservative)
+# ---------------------------------------------------------------------------
+
+def _left_margin_score(gray: np.ndarray) -> float:
+    """
+    Larger score => more empty left margin (typical LTR document layout).
+    """
+    ink = binary_ink(gray)
+    h, w = ink.shape
+    band = max(8, w // 12)
+    left = ink[:, :band].mean()
+    right = ink[:, w - band :].mean()
+    # Prefer less ink on the left (wider blank left margin).
+    return float((right + 1.0) / (left + 1.0))
+
+
+def measure_mirror(gray_small: np.ndarray) -> bool:
+    """
+    Return True only if horizontally flipped clearly looks more like a normal
+    LTR page (wider left margin). Default False when unsure.
+    """
+    normal = _left_margin_score(gray_small)
+    flipped = _left_margin_score(cv2.flip(gray_small, 1))
+    if flipped < normal * MIRROR_MARGIN:
+        return False
+    # Also require absolute gap so tiny noise doesn't flip pages.
+    if (flipped - normal) < 0.25:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE
+# ---------------------------------------------------------------------------
 
 def correct_image(image: np.ndarray) -> dict:
-    """Runs the full tilt -> rotation -> mirror pipeline on a full-resolution
-    BGR image. Returns a dict of measured values plus the corrected image."""
-    gray_small = cv2.cvtColor(downscale(image), cv2.COLOR_BGR2GRAY)
-    skew_deg = measure_skew_deg(gray_small)
-    deskewed = rotate_bound_cw(image, skew_deg)
+    gray_small = to_gray(downscale(image))
 
-    rotation_deg, rotation_conf = measure_rotation(cv2.cvtColor(downscale(deskewed), cv2.COLOR_BGR2GRAY))
-    if rotation_deg == 90:
-        upright = cv2.rotate(deskewed, cv2.ROTATE_90_CLOCKWISE)
-    elif rotation_deg == 180:
-        upright = cv2.rotate(deskewed, cv2.ROTATE_180)
-    elif rotation_deg == 270:
-        upright = cv2.rotate(deskewed, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    else:
-        upright = deskewed
+    tilt_angle = measure_tilt_deg(gray_small)
+    # Correct tilt ONLY when |tilt| <= 5°. Larger tilt is reported but not applied.
+    tilt_corrected = abs(tilt_angle) <= TILT_CORRECT_MAX_DEG and abs(tilt_angle) >= TILT_MIN_DEG
+    working = rotate_bound_cw(image, -tilt_angle) if tilt_corrected else image
 
-    upright_small = cv2.cvtColor(downscale(upright), cv2.COLOR_BGR2GRAY)
-    words_normal, conf_normal = ocr_quality(upright_small)
-    flipped_small = cv2.flip(upright_small, 1)
-    words_flipped, conf_flipped = ocr_quality(flipped_small)
+    gray_for_rot = to_gray(downscale(working))
+    rotation_deg = measure_rotation_deg(gray_for_rot)
+    working = apply_rotation_cw(working, rotation_deg)
 
-    mirrored = False
-    if max(words_normal, words_flipped) >= MIN_MIRROR_WORDS:
-        mirrored = (words_flipped, conf_flipped) > (words_normal, conf_normal)
-    final = cv2.flip(upright, 1) if mirrored else upright
+    gray_for_mirror = to_gray(downscale(working))
+    mirrored = measure_mirror(gray_for_mirror)
+    if mirrored:
+        working = cv2.flip(working, 1)
 
     return {
-        "skew_angle_deg": round(skew_deg, 3),
+        "tilt_angle_deg": tilt_angle,
+        "tilt_corrected": "Yes" if tilt_corrected else "No",
         "rotation_deg": rotation_deg,
-        "rotation_confidence": round(rotation_conf, 3),
-        "mirrored": mirrored,
-        "mirror_words_normal": words_normal,
-        "mirror_conf_normal": round(conf_normal, 2),
-        "mirror_words_flipped": words_flipped,
-        "mirror_conf_flipped": round(conf_flipped, 2),
-        "image": final,
+        "mirrored": "Yes" if mirrored else "No",
+        "image": working,
     }
 
 
@@ -345,34 +364,37 @@ def process_folder(
         for blob_name in blob_names:
             filename = Path(blob_name).name
             log(f"  {filename}")
-            row = {"folder": folder_name, "filename": filename, "status": "ok", "error": ""}
+            row = {
+                "folder": folder_name,
+                "filename": filename,
+                "status": "ok",
+                "error": "",
+            }
             try:
                 local_path = download_blob(container_client, blob_name, tmp_path / filename)
                 image = cv2.imread(str(local_path))
                 if image is None:
                     raise ValueError("cv2.imread returned None (unreadable/corrupt image)")
+
                 result = correct_image(image)
                 out_path = out_folder / filename
-                # Always write a copy — including images that needed no correction
-                # (skew=0, rotation=0, mirrored=False).
-                changed = (
-                    abs(result["skew_angle_deg"]) > 0
-                    or result["rotation_deg"] != 0
-                    or result["mirrored"]
-                )
                 if not cv2.imwrite(str(out_path), result.pop("image")):
                     raise ValueError(f"cv2.imwrite failed: {out_path}")
+
                 row.update(result)
                 row["output_path"] = str(out_path)
                 log(
-                    f"    wrote {'corrected' if changed else 'unchanged (copied)'} "
-                    f"skew={row['skew_angle_deg']} rot={row['rotation_deg']} "
-                    f"mirror={row['mirrored']} -> {out_path.name}"
+                    f"    tilt={row['tilt_angle_deg']} (corrected={row['tilt_corrected']}) "
+                    f"rot={row['rotation_deg']} mirror={row['mirrored']} -> {out_path.name}"
                 )
             except Exception as exc:
                 row["status"] = "error"
                 row["error"] = f"{type(exc).__name__}: {exc}"
                 row["output_path"] = ""
+                row.setdefault("tilt_angle_deg", "")
+                row.setdefault("tilt_corrected", "")
+                row.setdefault("rotation_deg", "")
+                row.setdefault("mirrored", "")
                 log(f"    ERROR: {row['error']}")
             writer.writerow(row)
             csv_file.flush()
@@ -381,11 +403,11 @@ def process_folder(
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
-    log("=== TILT / ROTATION / MIRROR CORRECTION (OpenCV + Tesseract OSD) ===")
-    output_dir = OUTPUT_DIR
+    log("=== TILT / ROTATION / MIRROR (OpenCV only) ===")
     log(f"INPUT:  azure://{STORAGE_ACCOUNT}/{CONTAINER_NAME}/{PREFIX}")
-    log(f"OUTPUT: {output_dir}")
+    log(f"OUTPUT: {OUTPUT_DIR}")
     log(f"CSV:    {CSV_PATH}")
+    log(f"Tilt correction only if |tilt| <= {TILT_CORRECT_MAX_DEG}°")
     log(f"START_FROM: {START_FROM or '(first folder)'}")
 
     container_client = connect_azure()
@@ -397,23 +419,21 @@ def main() -> None:
             "Check CONTAINER_NAME, PREFIX, and blob folder structure."
         )
 
-    require_tesseract()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    write_header = not CSV_PATH.is_file()
-    with CSV_PATH.open("a", newline="", encoding="utf-8") as csv_file:
+    # Fresh report file (new columns). Rename old CSV if you need to keep it.
+    with CSV_PATH.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
-        if write_header:
-            writer.writeheader()
-            csv_file.flush()
+        writer.writeheader()
+        csv_file.flush()
         for folder_name in chart_folders:
             images = list_jpgs(folder_blobs, folder_name)
             if not images:
                 log(f"Folder: {folder_name} (no JPGs, skipped)")
                 continue
             log(f"Folder: {folder_name}")
-            process_folder(writer, csv_file, container_client, output_dir, folder_name, images)
+            process_folder(writer, csv_file, container_client, OUTPUT_DIR, folder_name, images)
 
     log(f"Done. Report: {CSV_PATH}")
 
