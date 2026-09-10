@@ -30,14 +30,32 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ============================================================
 
 STORAGE_ACCOUNT = "azsadve2aipoc"
-CONTAINER_NAME = "YOUR_CONTAINER_NAME"
-PREFIX = "Run1/Batch1/DEID_PNGs/"
+CONTAINER_NAME = "imaging-pipeline"
+PREFIX = "Raw_Input/Run1/Batch1/DEID_PNGs/"
 
 # Classification starts at this folder, then continues with later folders.
 # Use only the folder name, not the full path.
-START_FROM = ""
+START_FROM = "52748416_44709403"
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+IMAGE_SUFFIXES = {
+    ".bmp",
+    ".dib",
+    ".gif",
+    ".j2k",
+    ".jfif",
+    ".jp2",
+    ".jpe",
+    ".jpeg",
+    ".jpg",
+    ".pbm",
+    ".pgm",
+    ".png",
+    ".pnm",
+    ".ppm",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 
 CSV_COLUMNS = [
     "chart_name",
@@ -127,12 +145,18 @@ def download_blob_bytes(container_client: ContainerClient, blob_name: str) -> by
     return container_client.download_blob(blob_name).readall()
 
 
-def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
+def init_csv(path: Path) -> None:
+    """Create CSV with header only (overwrite if exists)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
+        csv.DictWriter(f, fieldnames=CSV_COLUMNS).writeheader()
+        f.flush()
+
+
+def append_csv_row(path: Path, row: dict[str, str]) -> None:
+    with path.open("a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=CSV_COLUMNS).writerow(row)
+        f.flush()
 
 
 def process_folder(
@@ -140,11 +164,16 @@ def process_folder(
     model,
     folder_name: str,
     blob_names: list[str],
+    out_csv: Path,
     per_chart_dir: Path | None,
-) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+) -> int:
     log(f"  {len(blob_names)} images")
+    chart_csv: Path | None = None
+    if per_chart_dir is not None:
+        chart_csv = per_chart_dir / f"{folder_name}_hw_printed.csv"
+        init_csv(chart_csv)
 
+    count = 0
     for page_number, blob_name in enumerate(blob_names, start=1):
         filename = Path(blob_name).name
         log(f"  {filename}")
@@ -155,23 +184,22 @@ def process_folder(
             label, conf, method = "ERROR", None, str(exc)
             log(f"    ERROR: {exc}")
 
-        rows.append(
-            {
-                "chart_name": folder_name,
-                "page_name": filename,
-                "page_number": str(page_number),
-                "handwritten_or_printed": label,
-                "confidence": "" if conf is None else f"{conf:.4f}",
-                "method": method,
-            }
-        )
+        row = {
+            "chart_name": folder_name,
+            "page_name": filename,
+            "page_number": str(page_number),
+            "handwritten_or_printed": label,
+            "confidence": "" if conf is None else f"{conf:.4f}",
+            "method": method,
+        }
+        append_csv_row(out_csv, row)
+        if chart_csv is not None:
+            append_csv_row(chart_csv, row)
+        count += 1
 
-    if per_chart_dir is not None:
-        chart_csv = per_chart_dir / f"{folder_name}_hw_printed.csv"
-        write_csv(chart_csv, rows)
+    if chart_csv is not None:
         log(f"  → {chart_csv}")
-
-    return rows
+    return count
 
 
 def main() -> None:
@@ -190,7 +218,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        default=SCRIPT_DIR / "output" / "hw_printed.csv",
+        default=Path(r"C:\Users\sumit.pandey\Desktop\hw_printed.csv"),
         help="Combined CSV path",
     )
     parser.add_argument(
@@ -206,9 +234,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    out_csv = args.out.resolve()
+    # Create the CSV immediately so it appears before Azure scan / classification.
+    init_csv(out_csv)
+
     log("=== HW / PRINTED CLASSIFY (Azure Blob) ===")
     log(f"INPUT:  azure://{STORAGE_ACCOUNT}/{CONTAINER_NAME}/{PREFIX}")
-    log(f"OUTPUT: {args.out.resolve()}")
+    log(f"OUTPUT: {out_csv}")
+    log(f"CSV started: {out_csv}")
     log(f"START_FROM: {START_FROM or '(first folder)'}")
 
     container_client = connect_azure()
@@ -230,20 +263,18 @@ def main() -> None:
     if per_chart_dir is not None:
         per_chart_dir.mkdir(parents=True, exist_ok=True)
 
-    all_rows: list[dict[str, str]] = []
+    total_rows = 0
     for folder_name in chart_folders:
         images = list_page_blobs(folder_blobs, folder_name)
         if not images:
             log(f"Folder: {folder_name} (no images, skipped)")
             continue
         log(f"Folder: {folder_name}")
-        rows = process_folder(
-            container_client, model, folder_name, images, per_chart_dir
+        total_rows += process_folder(
+            container_client, model, folder_name, images, out_csv, per_chart_dir
         )
-        all_rows.extend(rows)
 
-    write_csv(args.out.resolve(), all_rows)
-    log(f"wrote {len(all_rows)} rows → {args.out.resolve()}")
+    log(f"done — {total_rows} rows → {out_csv}")
 
 
 if __name__ == "__main__":
