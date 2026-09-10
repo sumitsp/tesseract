@@ -403,11 +403,14 @@ def _morphology_score(ink: np.ndarray) -> float:
     return hs / (vs + 1.0)
 
 
-def _component_score(ink: np.ndarray) -> tuple[float, int, int]:
+def _component_score(ink: np.ndarray) -> tuple[float, int, int, list[TextLine]]:
+    """Returns (score, n_comp, n_lines, lines). ``lines`` is exposed so
+    callers (score_orientation) can reuse it for the up/down vote below
+    instead of re-running component extraction/grouping a second time."""
     comps = extract_text_components(ink)
     n = len(comps)
     if n < 8:
-        return 0.0, n, 0
+        return 0.0, n, 0, []
     widths = np.array([c.w for c in comps], dtype=np.float64)
     heights = np.array([c.h for c in comps], dtype=np.float64)
     # Upright glyphs tend to be taller than wide on average for Latin/forms.
@@ -424,69 +427,134 @@ def _component_score(ink: np.ndarray) -> tuple[float, int, int]:
         flat = 0.0
     score = (0.35 * min(aspect, 2.0) + 0.40 * min(n_lines / 20.0, 1.0)
              + 0.15 * min(line_quality * 2, 1.0) + 0.10 * flat)
-    return float(score), n, n_lines
+    return float(score), n, n_lines, lines
 
 
-def _layout_upright_bias(ink: np.ndarray) -> float:
-    """Mild 0-vs-180 signal: more structural mass in upper half is common."""
-    h = ink.shape[0]
-    top = float(ink[: h // 2].sum())
-    bottom = float(ink[h // 2 :].sum())
-    return (top - bottom) / (top + bottom + 1e-9)
-
-
-def _punctuation_bias(ink: np.ndarray) -> float:
+def _line_updown_votes(lines: list[TextLine]) -> tuple[int, int]:
     """
-    Tiny components often denser toward line baselines / lower page regions
-    when upright; weak signal, used only for 0/180 tie-break.
+    Per-line up/down orientation vote, local to each line's own bbox.
+
+    Latin text keeps its smallest marks (periods, commas, decimal points)
+    near the baseline - the BOTTOM of a line's own bounding box, not the
+    top. For each line with enough components, split that line's own
+    y-range at its own midpoint and see which half its smallest components
+    favor.
+
+    This replaces a whole-page top-half-vs-bottom-half ink split (the old
+    approach): that global version conflates *where content sits on the
+    page* (a sparse header over a dense table, say) with *which way is up*,
+    and flips on any page where real content legitimately concentrates in
+    one half - which is most of these intake forms. Anchoring the
+    measurement to each line's own local frame removes that confound: a
+    vote here only reflects that one line's own glyphs, not page layout.
+    Works the same way for any of the 4 rotation candidates, so it also
+    gives 90-vs-270 a real tie-break, which the page-level version never did.
+
+    Returns (votes_upright, votes_upside_down); lines with too few small
+    components, or no clear lean, don't vote either way.
     """
-    comps = extract_text_components(ink, min_area=8, max_area_frac=0.002, min_h=3, max_h_frac=0.04)
-    if len(comps) < 12:
-        return 0.0
-    ys = np.array([c.cy for c in comps], dtype=np.float64)
-    h = ink.shape[0]
-    lower = float(np.mean(ys > 0.55 * h))
-    upper = float(np.mean(ys < 0.45 * h))
-    return lower - upper
+    upright_votes = 0
+    upside_votes = 0
+    for line in lines:
+        if len(line.components) < 4:
+            continue
+        heights = np.array([c.h for c in line.components], dtype=np.float64)
+        med_h = float(np.median(heights))
+        if med_h <= 0:
+            continue
+        small = [c for c in line.components if c.h <= med_h * 0.6]
+        if len(small) < 2:
+            continue
+        y_top = min(c.y for c in line.components)
+        y_bot = max(c.y + c.h for c in line.components)
+        mid = (y_top + y_bot) / 2.0
+        lower = sum(1 for c in small if c.cy > mid)
+        upper = len(small) - lower
+        if lower == upper:
+            continue
+        if lower > upper:
+            upright_votes += 1
+        else:
+            upside_votes += 1
+    return upright_votes, upside_votes
 
 
 def score_orientation(ink: np.ndarray, gray: np.ndarray) -> dict[str, float]:
-    """Return per-orientation raw scores for {0,90,180,270}."""
-    scores: dict[str, float] = {}
-    details: dict[str, Any] = {}
+    """
+    Return per-orientation raw scores for {0, 90, 180, 270}.
+
+    This score answers exactly one question per candidate: "how much does
+    this look like organized, readable text lines" - it says nothing about
+    which way is up within that reading direction. Line evidence (comp/
+    n_lines, built from every grouped text line on the page - see
+    extract_text_components/group_text_lines, which scan the whole mask, no
+    sampling) is the PRIMARY signal: across every false-positive rotation
+    this detector has produced (table rule lines, evenly-spaced short
+    tokens in narrow columns, sparse-header/dense-table page layouts), line
+    evidence was the one signal that kept pointing at the true reading
+    axis. proj/morph are whole-mask pixel aggregates that can spike from
+    structure that has nothing to do with reading direction, so they're
+    kept only as a low-weight, capped secondary nudge - enough to break a
+    near-tie in line evidence, never enough to overturn a real gap in it.
+
+    Deliberately NOT folded in here: which way is up (0 vs 180, 90 vs 270).
+    _line_updown_votes answers that from the same ``lines``, but stays out
+    of this score entirely - see detect_rotation's docstring for why mixing
+    the two into one ranking is exactly what let a thin, lucky vote outrank
+    genuinely better line evidence in testing.
+    """
+    raw: dict[int, dict[str, Any]] = {}
     for deg in (0, 90, 180, 270):
         ink_r = _rotate_gray(ink, deg)
-        # Projection + morphology on ink; components on cleaned ink.
         proj = _projection_score(ink_r)
         morph = _morphology_score(ink_r)
-        comp, n_comp, n_lines = _component_score(ink_r)
-        upright = _layout_upright_bias(ink_r)
-        punct = _punctuation_bias(ink_r)
-
-        # Base structural score (shared by 0 and 180 when page is flipped).
-        base = 0.40 * proj + 0.25 * morph + 0.35 * comp
-
-        # 0 vs 180: add weak layout biases only for those candidates.
-        if deg in (0, 180):
-            # Map bias so higher favors this orientation being "upright".
-            # For deg=0, positive upright/punct favors keeping 0.
-            # For deg=180, we evaluate after rotating 180, so same features
-            # should look "upright" if 180 was the needed correction.
-            bias = 0.08 * upright + 0.05 * punct
-            total = base * (1.0 + bias)
-        else:
-            total = base
-
-        scores[str(deg)] = float(max(total, 0.0))
-        details[str(deg)] = {
+        comp, n_comp, n_lines, lines = _component_score(ink_r)
+        up_votes, down_votes = _line_updown_votes(lines)
+        raw[deg] = {
             "proj": proj,
             "morph": morph,
             "comp": comp,
             "n_comp": n_comp,
             "n_lines": n_lines,
-            "upright_bias": upright,
-            "punct_bias": punct,
-            "base": base,
+            "up_votes": up_votes,
+            "down_votes": down_votes,
+        }
+
+    # Normalize proj/morph to this page's own 0-1 range before weighting -
+    # unnormalized, either can spike to several times a "normal" value
+    # (e.g. a table rule line or a regular column of short tokens) and
+    # swamp a fixed-weight blend regardless of the intended weight ratio.
+    proj_max = max(r["proj"] for r in raw.values()) or 1.0
+    morph_max = max(r["morph"] for r in raw.values()) or 1.0
+
+    scores: dict[str, float] = {}
+    details: dict[str, Any] = {}
+    for deg in (0, 90, 180, 270):
+        r = raw[deg]
+        proj_n = r["proj"] / proj_max
+        morph_n = r["morph"] / morph_max
+
+        # comp dominates; proj/morph contribute at most 0.15 combined, so
+        # they can nudge a near-tie in line evidence but can never outvote
+        # a genuine gap in it.
+        total = r["comp"] + 0.10 * proj_n + 0.05 * morph_n
+
+        up, down = r["up_votes"], r["down_votes"]
+        total_votes = up + down
+        # Informational only (not used in `total` - see docstring); kept in
+        # diagnostics so it's visible without reruns.
+        updown_frac = (up - down) / total_votes if total_votes else 0.0
+
+        scores[str(deg)] = float(max(total, 0.0))
+        details[str(deg)] = {
+            "proj": r["proj"],
+            "morph": r["morph"],
+            "comp": r["comp"],
+            "n_comp": r["n_comp"],
+            "n_lines": r["n_lines"],
+            "up_votes": up,
+            "down_votes": down,
+            "updown_frac": updown_frac,
             "total": float(max(total, 0.0)),
         }
     return scores | {"_details": details}  # type: ignore[return-value]
@@ -496,100 +564,105 @@ def detect_rotation(
     ink: np.ndarray,
     gray: np.ndarray,
     *,
-    close_ratio: float = 1.08,
-    min_lines_for_quarter_turn: int = 3,
-    min_comp_score_for_quarter_turn: float = 0.15,
+    min_lines_for_rotation: int = 3,
+    min_comp_score_for_rotation: float = 0.15,
+    axis_margin_lines: int = 2,
+    min_votes_for_flip: int = 3,
+    min_vote_margin_for_flip: float = 0.30,
 ) -> tuple[int, float, bool, dict[str, Any]]:
     """
-    Returns (rotation_deg, confidence, ambiguous_0_180, diagnostics).
+    Returns (rotation_deg, confidence, ambiguous, diagnostics).
 
     ``rotation`` is the clockwise correction to apply to the input image.
+
+    Two independent stages, deliberately kept separate - an earlier version
+    folded the up/down vote into the same ranking score used to pick a
+    candidate, and in testing that let a thin-but-unanimous vote (e.g. 4
+    lines, 4-0) outrank a candidate with dramatically better line evidence
+    (38 real lines) but a too-small vote sample (1 line) to earn the same
+    boost. Scoring "how organized does this look" and "which way is up"
+    with two separate, appropriately-scoped checks - instead of one blended
+    number - closes that hole:
+
+      Stage A - which AXIS (upright-ish, or sideways)?
+        Decided purely by line evidence (score_orientation's comp/n_lines).
+        The sideways axis {90, 270} only wins if it clearly beats the
+        upright axis {0, 180} on BOTH n_lines and comp, by a real margin -
+        a quarter turn is a strong claim, and ties or single-metric
+        disagreement default to "no".
+
+      Stage B - which MEMBER of that axis (0 vs 180, or 90 vs 270)?
+        Decided purely by _line_updown_votes - a per-line, page-layout-
+        independent signal that never influenced Stage A, so it can't
+        distort which axis won. A member is only chosen when its vote has
+        enough independently-voting lines AND clearly beats the other
+        member's vote; if neither does, the answer is 0 - never a guess
+        between two equally-unconfirmed options.
+
+    A page only ever gets a non-zero rotation when both stages independently
+    agree; otherwise this returns 0 and marks the result ambiguous /
+    needs_review, rather than committing to an unconfirmed guess.
     """
     packed = score_orientation(ink, gray)
     details = packed.pop("_details")  # type: ignore[misc]
     scores = {int(k): float(v) for k, v in packed.items()}
-
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-    best_deg, best = ranked[0]
-    second_deg, second = ranked[1]
-    evidence = float(details[str(best_deg)]["n_comp"]) + 2.0 * float(details[str(best_deg)]["n_lines"])
-
-    sep = (best - second) / (best + 1e-9)
-    conf = float(np.clip(0.35 + 2.0 * sep + 0.01 * min(evidence, 40), 0.0, 1.0))
-
     ambiguous = False
 
-    # A 90/270 call is a strong claim (the page is sideways) and proj/morph
-    # (0.65 combined weight in score_orientation) can spike from structure
-    # that has nothing to do with reading direction: table rule lines, or -
-    # even on a page with no lines at all - evenly-spaced short tokens
-    # (e.g. narrow label/date/value columns) that happen to project more
-    # sharply once rotated. comp/n_lines (built from grouped text glyphs)
-    # has been the reliable signal in both failure modes seen so far, so a
-    # quarter-turn is only trusted when it clears an absolute evidence
-    # floor AND actually looks more line-organized than the page already
-    # does at 0/180 - not just "organized enough". Otherwise fall back to 0
-    # rather than rotate an already-upright page.
-    if best_deg in (90, 270):
-        best_details = details[str(best_deg)]
-        upright_lines = max(details["0"]["n_lines"], details["180"]["n_lines"])
-        upright_comp = max(details["0"]["comp"], details["180"]["comp"])
-        if (
-            best_details["n_lines"] < min_lines_for_quarter_turn
-            or best_details["comp"] < min_comp_score_for_quarter_turn
-            or best_details["n_lines"] <= upright_lines
-            or best_details["comp"] <= upright_comp
-        ):
-            best_deg = 0
-            best = scores[0]
-            conf = min(conf, 0.45)
-            ambiguous = True
-    # 0-vs-180: proj/morph/comp are ~symmetric under a half turn (a
-    # horizontal projection profile, line-opening counts, and grouped text
-    # lines all look the same whether the page is read top-to-bottom or
-    # flipped), so this axis rides entirely on the small upright_bias/
-    # punct_bias terms folded into score_orientation - weak content-density
-    # priors ("more mass/detail up top is typical") that legitimately
-    # invert on a page with a sparse header and dense content lower down
-    # (e.g. a letterhead margin above a full table). A 180 call is just as
-    # strong a claim as a 90/270 one, so - same principle as the
-    # quarter-turn guard above - require a decisive margin AND both bias
-    # signals to actually agree on direction, not just average to a net
-    # positive while contradicting each other. Otherwise default to 0.
-    s0, s180 = scores[0], scores[180]
-    sep_0_180 = abs(s0 - s180) / (max(s0, s180) + 1e-9)
-    if best_deg == 180:
-        d0, d180 = details["0"], details["180"]
-        corroborated = (d180["upright_bias"] > d0["upright_bias"]) == (
-            d180["punct_bias"] > d0["punct_bias"]
-        )
-        if sep_0_180 < 0.15 or not corroborated:
-            best_deg = 0
-            best = s0
-            conf = min(conf, 0.45)
-            ambiguous = True
-    if sep_0_180 < 0.08 and best_deg in (0, 180):
-        ambiguous = True
-        conf = min(conf, 0.45)
+    def _evidence(deg: int) -> tuple[int, float]:
+        d = details[str(deg)]
+        return d["n_lines"], d["comp"]
 
+    # --- Stage A: which axis ---
+    up_lines, up_comp = max(_evidence(0), _evidence(180))
+    side_lines, side_comp = max(_evidence(90), _evidence(270))
+    if max(up_lines, side_lines) < min_lines_for_rotation:
+        # Neither axis has real line evidence - near-blank/illegible page,
+        # nothing here is trustworthy.
+        ambiguous = True
+    sideways_wins = (
+        side_lines > up_lines + axis_margin_lines
+        and side_comp > up_comp
+        and side_comp >= min_comp_score_for_rotation
+    )
+    axis = (90, 270) if sideways_wins else (0, 180)
+
+    # --- Stage B: which member of that axis ---
+    a, b = axis
+    d_a, d_b = details[str(a)], details[str(b)]
+    a_total = d_a["up_votes"] + d_a["down_votes"]
+    b_total = d_b["up_votes"] + d_b["down_votes"]
+    a_net = (d_a["up_votes"] - d_a["down_votes"]) / a_total if a_total else 0.0
+    b_net = (d_b["up_votes"] - d_b["down_votes"]) / b_total if b_total else 0.0
+
+    def _decisive(net: float, total: int, other_net: float) -> bool:
+        return total >= min_votes_for_flip and net >= min_vote_margin_for_flip and net > other_net
+
+    if _decisive(b_net, b_total, a_net):
+        best_deg = b
+    elif _decisive(a_net, a_total, b_net):
+        best_deg = a
+    else:
+        best_deg = 0
+        ambiguous = True
+
+    # --- Confidence: how decisively each stage landed. ---
+    axis_sep = abs(side_comp - up_comp) / (max(side_comp, up_comp) + 1e-9)
+    vote_sep = abs(b_net - a_net)
+    evidence = float(details[str(best_deg)]["n_comp"]) + 2.0 * float(details[str(best_deg)]["n_lines"])
+    conf = float(np.clip(0.30 + 0.9 * axis_sep + 0.5 * vote_sep + 0.01 * min(evidence, 40), 0.0, 1.0))
+    if ambiguous:
+        conf = min(conf, 0.45)
     if evidence < 12:
         conf = min(conf, 0.35)
         ambiguous = True
-
-    if best > 0 and best < second * close_ratio and best_deg != 0:
-        # Weak winner — fall back to 0 rather than a shaky 90/270.
-        if best_deg in (90, 270) and scores[0] > best * 0.85:
-            best_deg = 0
-            conf = min(conf, 0.5)
-            ambiguous = True
 
     diag = {
         "rotation_scores": {str(k): v for k, v in scores.items()},
         "rotation_details": details,
         "rotation_best": best_deg,
-        "rotation_second": second_deg,
+        "rotation_axis": axis,
         "rotation_evidence": evidence,
-        "rotation_ambiguous_0_180": ambiguous,
+        "rotation_ambiguous": ambiguous,
     }
     return int(best_deg), float(conf), bool(ambiguous), diag
 
