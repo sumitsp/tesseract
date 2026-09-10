@@ -544,15 +544,33 @@ def detect_rotation(
             best = scores[0]
             conf = min(conf, 0.45)
             ambiguous = True
-    # Special handling: 0 vs 180 near-tie.
+    # 0-vs-180: proj/morph/comp are ~symmetric under a half turn (a
+    # horizontal projection profile, line-opening counts, and grouped text
+    # lines all look the same whether the page is read top-to-bottom or
+    # flipped), so this axis rides entirely on the small upright_bias/
+    # punct_bias terms folded into score_orientation - weak content-density
+    # priors ("more mass/detail up top is typical") that legitimately
+    # invert on a page with a sparse header and dense content lower down
+    # (e.g. a letterhead margin above a full table). A 180 call is just as
+    # strong a claim as a 90/270 one, so - same principle as the
+    # quarter-turn guard above - require a decisive margin AND both bias
+    # signals to actually agree on direction, not just average to a net
+    # positive while contradicting each other. Otherwise default to 0.
     s0, s180 = scores[0], scores[180]
-    if max(s0, s180) > 0 and min(s0, s180) / (max(s0, s180) + 1e-9) > 0.92:
-        if best_deg in (0, 180):
-            ambiguous = True
+    sep_0_180 = abs(s0 - s180) / (max(s0, s180) + 1e-9)
+    if best_deg == 180:
+        d0, d180 = details["0"], details["180"]
+        corroborated = (d180["upright_bias"] > d0["upright_bias"]) == (
+            d180["punct_bias"] > d0["punct_bias"]
+        )
+        if sep_0_180 < 0.15 or not corroborated:
+            best_deg = 0
+            best = s0
             conf = min(conf, 0.45)
-            # Prefer 0 when essentially tied (do not invent 180).
-            if abs(s0 - s180) / (max(s0, s180) + 1e-9) < 0.04:
-                best_deg = 0
+            ambiguous = True
+    if sep_0_180 < 0.08 and best_deg in (0, 180):
+        ambiguous = True
+        conf = min(conf, 0.45)
 
     if evidence < 12:
         conf = min(conf, 0.35)
