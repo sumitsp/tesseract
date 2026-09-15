@@ -1,0 +1,17 @@
+# Shared
+python-dotenv>=1.0.0
+azure-identity>=1.15.0
+azure-storage-blob>=12.19.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# OCR / imaging
+opencv-python>=4.8.0
+pytesseract>=0.3.10
+rapidocr>=2.0.0
+docling>=2.0.0
+torch>=2.0.0
+
+# HW / printed classifier
+joblib>=1.3.0
+scikit-learn>=1.3.0
