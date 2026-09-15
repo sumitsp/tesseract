@@ -44,6 +44,8 @@ output/
 *.joblib
 *.h5
 *.onnx
+# ConvNeXt HW/printed classifier — tracked via Git LFS
+!image_preprocessing/document_type/models/handwritten_printed_convnext_tiny.pth
 
 # Archives / dumps
 *.zip

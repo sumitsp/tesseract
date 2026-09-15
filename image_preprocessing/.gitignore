@@ -7,8 +7,7 @@ debug/
 *.log
 .DS_Store
 
-# Model weights — too large for GitHub; keep metadata.json tracked
+# Model weights (best/last stay local). Production ConvNeXt is tracked via Git LFS.
 document_type/models/*.pth
 document_type/models/*.pt
-document_type/models/best_model.pth
-document_type/models/last_model.pth
+!document_type/models/handwritten_printed_convnext_tiny.pth
