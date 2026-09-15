@@ -1,12 +1,15 @@
-"""Stage 4B — resolve the 180° ambiguity with Tesseract OSD only.
+"""Stage 4B — resolve the 180° ambiguity.
 
 Text-line geometry cannot tell 120° from 300°. After the geometric detector
-has aligned lines to (approximately) horizontal, Tesseract OSD is asked a
-single question: is the page upright, or upside down?
+has aligned lines to (approximately) horizontal, this stage asks: is the
+page upright, or upside down?
 
-OSD is never used to estimate the arbitrary angle itself. Full OCR is not
-run. If OSD is unavailable, low-confidence, or disagrees with a 90°/270°
-reading, the pipeline abstains rather than guessing.
+Primary signal: Tesseract OSD (orientation only — never used to estimate the
+arbitrary angle itself). Full OCR is not run.
+
+Fallback (when Tesseract is missing / OSD fails): classical per-line
+ascender/descender-style votes from glyph components. This is conservative;
+if the fallback is also ambiguous the pipeline abstains rather than guessing.
 """
 
 from __future__ import annotations
@@ -18,11 +21,17 @@ from typing import Any
 import numpy as np
 
 from image_preprocessing.config import PipelineConfig
+from image_preprocessing.orientation.text_geometry import (
+    extract_ink,
+    extract_text_components,
+    group_text_lines,
+)
 from image_preprocessing.utils.image_utils import (
     INTER_DOWNSAMPLE,
     bgr_to_pil,
     ensure_bgr,
     resize_max_dimension,
+    to_gray,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -56,6 +65,102 @@ def _run_osd(image: np.ndarray) -> dict[str, Any] | None:
         return None
 
 
+def _line_updown_votes(image: np.ndarray) -> tuple[int, int, dict[str, Any]]:
+    """Classical 180° vote after lines are already near-horizontal.
+
+    Latin text tends to keep small marks (periods, commas) near the baseline
+    (bottom of each line box). Returns (votes_upright, votes_upside_down, diag).
+    """
+    gray = to_gray(image)
+    analysis, _ = resize_max_dimension(gray, 1200, interpolation=INTER_DOWNSAMPLE)
+    _clahe, _ink, ink = extract_ink(analysis)
+    comps = extract_text_components(ink)
+    lines = group_text_lines(comps, min_comps=3)
+    upright = 0
+    upside = 0
+    for line in lines:
+        if len(line.components) < 4:
+            continue
+        heights = np.array([c.h for c in line.components], dtype=np.float64)
+        med_h = float(np.median(heights))
+        if med_h <= 0:
+            continue
+        small = [c for c in line.components if c.h <= med_h * 0.6]
+        if len(small) < 2:
+            continue
+        y_top = min(c.y for c in line.components)
+        y_bot = max(c.y + c.h for c in line.components)
+        mid = (y_top + y_bot) / 2.0
+        lower = sum(1 for c in small if c.cy > mid)
+        upper = len(small) - lower
+        if lower == upper:
+            continue
+        if lower > upper:
+            upright += 1
+        else:
+            upside += 1
+    return upright, upside, {"n_lines": len(lines), "n_comps": len(comps)}
+
+
+def _resolve_with_geometry_fallback(
+    geometric_angle_180: float,
+    aligned_image: np.ndarray,
+    *,
+    reason: str,
+) -> OsdDirectionResult:
+    upright, upside, vote_diag = _line_updown_votes(aligned_image)
+    total = upright + upside
+    diag = {
+        "reason": reason,
+        "fallback": "line_updown_votes",
+        "upright_votes": upright,
+        "upside_votes": upside,
+        **vote_diag,
+        "geometric_angle_180": geometric_angle_180,
+    }
+    # Need a clear majority on enough independent lines.
+    if total < 3:
+        return OsdDirectionResult(
+            rotation_angle=None,
+            osd_rotate=None,
+            osd_orientation=None,
+            osd_confidence=None,
+            confidence=0.2,
+            status="UNCERTAIN",
+            warning="Rotation could not be determined confidently",
+            diagnostics={**diag, "fallback_result": "insufficient_votes"},
+        )
+    margin = abs(upright - upside) / float(total)
+    if margin < 0.30:
+        return OsdDirectionResult(
+            rotation_angle=None,
+            osd_rotate=None,
+            osd_orientation=None,
+            osd_confidence=None,
+            confidence=round(float(0.35 * margin), 4),
+            status="UNCERTAIN",
+            warning="Rotation could not be determined confidently",
+            diagnostics={**diag, "fallback_result": "ambiguous_votes"},
+        )
+
+    add_180 = upside > upright
+    final = (float(geometric_angle_180) + (180.0 if add_180 else 0.0)) % 360.0
+    conf = float(np.clip(0.50 + 0.45 * margin, 0.0, 0.92))
+    warning = None
+    if reason == "osd_unavailable":
+        warning = "Tesseract OSD unavailable; used classical 180-degree fallback"
+    return OsdDirectionResult(
+        rotation_angle=round(final, 2),
+        osd_rotate=180 if add_180 else 0,
+        osd_orientation=None,
+        osd_confidence=None,
+        confidence=round(conf, 4),
+        status="RESOLVED",
+        warning=warning,
+        diagnostics={**diag, "fallback_result": "resolved", "add_180": add_180},
+    )
+
+
 def resolve_180(
     aligned_image: np.ndarray,
     geometric_angle_180: float,
@@ -68,15 +173,8 @@ def resolve_180(
     """
     osd = _run_osd(aligned_image)
     if not osd:
-        return OsdDirectionResult(
-            rotation_angle=None,
-            osd_rotate=None,
-            osd_orientation=None,
-            osd_confidence=None,
-            confidence=0.0,
-            status="UNCERTAIN",
-            warning="Rotation could not be determined confidently",
-            diagnostics={"reason": "osd_unavailable"},
+        return _resolve_with_geometry_fallback(
+            geometric_angle_180, aligned_image, reason="osd_unavailable"
         )
 
     rotate = int(osd.get("rotate", 0)) % 360
@@ -96,20 +194,17 @@ def resolve_180(
     }
 
     if osd_conf < config.osd_min_orientation_confidence:
-        return OsdDirectionResult(
-            rotation_angle=None,
-            osd_rotate=rotate,
-            osd_orientation=orientation,
-            osd_confidence=osd_conf,
-            confidence=round(float(np.clip(osd_conf / 10.0, 0.0, 0.49)), 4),
-            status="UNCERTAIN",
-            warning="Rotation could not be determined confidently",
-            diagnostics={**diag, "reason": "osd_low_confidence"},
+        # Weak OSD → try classical fallback before giving up.
+        fallback = _resolve_with_geometry_fallback(
+            geometric_angle_180, aligned_image, reason="osd_low_confidence"
         )
+        fallback.diagnostics = {**diag, **fallback.diagnostics}
+        fallback.osd_rotate = rotate
+        fallback.osd_orientation = orientation
+        fallback.osd_confidence = osd_conf
+        return fallback
 
     if rotate in (90, 270):
-        # Geometry claimed the lines are horizontal; OSD says the page is
-        # sideways. The two stages disagree — do not force a correction.
         return OsdDirectionResult(
             rotation_angle=None,
             osd_rotate=rotate,
@@ -126,8 +221,6 @@ def resolve_180(
     else:
         final = float(geometric_angle_180) % 360.0
 
-    # Map OSD confidence (often ~0–20) into 0–1 without claiming certainty
-    # OSD cannot actually provide.
     mapped = float(np.clip(0.45 + 0.55 * min(osd_conf / 8.0, 1.0), 0.0, 1.0))
     return OsdDirectionResult(
         rotation_angle=round(final, 2),

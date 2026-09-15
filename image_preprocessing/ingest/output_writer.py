@@ -29,7 +29,12 @@ class OutputLayout:
 
 def corrected_page_filename(page: LoadedPage) -> str:
     stem = _safe_stem(page.document_name)
-    if page.input_format.lower() == "pdf" or page.extras.get("frame_count", 1) > 1:
+    multi_page = (
+        page.input_format.lower() in {"pdf", "tif", "tiff"}
+        or int(page.extras.get("frame_count", 1) or 1) > 1
+        or page.page_number > 1
+    )
+    if multi_page:
         return f"{stem}_page_{page.page_number:03d}.png"
     return f"{stem}_corrected.png"
 

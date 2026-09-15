@@ -5,8 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageFile, ImageOps, ImageSequence
+from PIL import Image, ImageFile, ImageOps
 
 from image_preprocessing.config import RASTER_EXTENSIONS
 from image_preprocessing.results import LoadedPage
@@ -24,9 +23,6 @@ def read_embedded_dpi(image: Image.Image) -> tuple[float | None, str]:
         vals = [float(v) for v in dpi if v]
         positive = [v for v in vals if v > 1.0]
         if positive:
-            # Ignore the common "1 dpi" / "72 as placeholder" only when it is
-            # the only value and obviously not a scanner DPI. 72 can be real
-            # for screen captures, so we keep it.
             return float(sum(positive) / len(positive)), "embedded"
 
     jfif = info.get("jfif_density")
@@ -55,25 +51,46 @@ def read_embedded_dpi(image: Image.Image) -> tuple[float | None, str]:
     return None, "unknown"
 
 
+def _frame_count(image: Image.Image) -> int:
+    n = getattr(image, "n_frames", 1)
+    try:
+        return max(1, int(n))
+    except (TypeError, ValueError):
+        return 1
+
+
 def load_raster_pages(
     path: Path,
     *,
     document_index: int,
     document_name: str | None = None,
 ) -> list[LoadedPage]:
+    """Load every page/frame of a raster file.
+
+    Important for multi-page TIFF
+    -----------------------------
+    Do **not** materialise ``list(ImageSequence.Iterator(im))`` and copy later.
+    Pillow reuses one Image object and only ``seek()`` changes the active
+    frame, so that pattern silently turns every page into the **last** frame.
+
+    Correct pattern: ``seek(i)`` then ``copy()`` immediately inside the loop.
+    """
     path = path.resolve()
     document_name = document_name or path.name
     pages: list[LoadedPage] = []
     with Image.open(path) as master:
-        frames = list(ImageSequence.Iterator(master))
-        n_frames = max(1, len(frames))
-        for idx, frame in enumerate(frames, start=1):
-            frame = frame.copy()
+        n_frames = _frame_count(master)
+        for idx in range(n_frames):
+            # Seek + independent copy before reading pixels / converting.
+            master.seek(idx)
+            frame = master.copy()
+            frame.load()  # force decode of this frame now
             frame = ImageOps.exif_transpose(frame) or frame
             if frame.mode not in {"RGB", "L"}:
                 frame = frame.convert("RGB")
             dpi, dpi_source = read_embedded_dpi(frame)
-            image = pil_to_bgr(frame)
+            # Own contiguous array — never share buffers across pages.
+            image = pil_to_bgr(frame).copy()
             warnings: list[str] = []
             if dpi is None:
                 warnings.append("DPI_UNKNOWN: Raster DPI metadata unavailable")
@@ -81,7 +98,7 @@ def load_raster_pages(
                 LoadedPage(
                     document_name=document_name,
                     document_index=document_index,
-                    page_number=idx,
+                    page_number=idx + 1,
                     input_file=str(path),
                     input_path=path,
                     input_format=path.suffix.lower().lstrip(".") or "unknown",
@@ -93,7 +110,10 @@ def load_raster_pages(
                     extras={"frame_count": n_frames},
                 )
             )
-    LOGGER.debug("Loaded %s raster page(s) from %s", len(pages), path)
+    if n_frames > 1:
+        LOGGER.info("Loaded %s multi-page raster frames from %s", n_frames, path)
+    else:
+        LOGGER.debug("Loaded %s raster page(s) from %s", len(pages), path)
     return pages
 
 

@@ -276,6 +276,8 @@ def process_page(
             result.rotation_angle = None
             result.rotation_status = "UNCERTAIN"
             result.add_warning("Rotation could not be determined confidently")
+            if osd.warning and osd.warning not in result.warning_list:
+                result.add_warning(osd.warning)
             if osd.diagnostics.get("reason") == "osd_unavailable":
                 result.add_warning("Tesseract OSD unavailable; 180-degree ambiguity unresolved")
             result.mirror = "UNKNOWN"
@@ -288,6 +290,8 @@ def process_page(
         else:
             candidate_angle = float(osd.rotation_angle)
             result.rotation_confidence = round(float(min(geom.confidence, osd.confidence)), 4)
+            if osd.warning:
+                result.add_warning(osd.warning)
             if abs(candidate_angle) < 0.2 or abs(candidate_angle - 360) < 0.2:
                 result.rotation_angle = 0.0
                 result.rotation_status = "NOT_NEEDED"
