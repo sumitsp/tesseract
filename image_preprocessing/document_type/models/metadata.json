@@ -1,0 +1,523 @@
+{
+  "architecture": "convnext_tiny",
+  "method": "convnext_tiny",
+  "created_at": "2026-09-15T20:58:46.433104+00:00",
+  "image_size": 224,
+  "normalize_mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "normalize_std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "classes": {
+    "0": "Printed",
+    "1": "Handwritten"
+  },
+  "decision_threshold": 0.5,
+  "uncertain_min_confidence": 0.55,
+  "uncertain_margin": 0.12,
+  "uncertain_rule": "If P(Handwritten) >= decision_threshold predict Handwritten, else Printed. Return Uncertain when |P(Handwritten)-threshold| < uncertain_margin or the predicted-class probability is below uncertain_min_confidence.",
+  "seed": 42,
+  "device": "mps",
+  "english_only": true,
+  "dataset": {
+    "total_images": 210,
+    "class_counts": {
+      "Printed": 105,
+      "Handwritten": 105
+    },
+    "canonical_classes": {
+      "0": "Printed",
+      "1": "Handwritten"
+    },
+    "isprinted_json_convention": {
+      "0": "Handwritten",
+      "1": "Printed",
+      "note": "JSON value is 'is printed'. Canonical model ids invert this to 0=Printed, 1=Handwritten."
+    },
+    "formats": {
+      ".jpg": 210
+    },
+    "color_modes": {
+      "RGB": 210
+    },
+    "unique_dimensions": 57,
+    "width_min_median_max": [
+      1201,
+      1240,
+      2555
+    ],
+    "height_min_median_max": [
+      810,
+      1755,
+      2052
+    ],
+    "exact_md5_duplicate_groups": [
+      [
+        "138.jpg",
+        "139.jpg"
+      ],
+      [
+        "148.jpg",
+        "149.jpg"
+      ]
+    ],
+    "exact_duplicate_count": 2,
+    "near_duplicate_groups": [
+      {
+        "group_id": "g0049",
+        "count": 3,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Handwritten"
+        ],
+        "files": [
+          "15.jpg",
+          "50.jpg",
+          "51.jpg"
+        ]
+      },
+      {
+        "group_id": "g0024",
+        "count": 12,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "25.jpg",
+          "26.jpg",
+          "27.jpg",
+          "28.jpg",
+          "30.jpg",
+          "34.jpg",
+          "35.jpg",
+          "36.jpg",
+          "37.jpg",
+          "38.jpg",
+          "39.jpg",
+          "40.jpg"
+        ]
+      },
+      {
+        "group_id": "g0099",
+        "count": 2,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Handwritten"
+        ],
+        "files": [
+          "100.jpg",
+          "116.jpg"
+        ]
+      },
+      {
+        "group_id": "g0108",
+        "count": 2,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Handwritten"
+        ],
+        "files": [
+          "109.jpg",
+          "111.jpg"
+        ]
+      },
+      {
+        "group_id": "g0136",
+        "count": 7,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "137.jpg",
+          "162.jpg",
+          "163.jpg",
+          "173.jpg",
+          "195.jpg",
+          "197.jpg",
+          "210.jpg"
+        ]
+      },
+      {
+        "group_id": "g0137",
+        "count": 5,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "138.jpg",
+          "139.jpg",
+          "152.jpg",
+          "174.jpg",
+          "198.jpg"
+        ]
+      },
+      {
+        "group_id": "g0141",
+        "count": 21,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "140.jpg",
+          "142.jpg",
+          "147.jpg",
+          "150.jpg",
+          "153.jpg",
+          "155.jpg",
+          "160.jpg",
+          "164.jpg",
+          "166.jpg",
+          "171.jpg",
+          "175.jpg",
+          "177.jpg",
+          "181.jpg",
+          "185.jpg",
+          "187.jpg",
+          "192.jpg",
+          "194.jpg",
+          "199.jpg",
+          "201.jpg",
+          "206.jpg",
+          "208.jpg"
+        ]
+      },
+      {
+        "group_id": "g0140",
+        "count": 6,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "141.jpg",
+          "154.jpg",
+          "165.jpg",
+          "176.jpg",
+          "186.jpg",
+          "200.jpg"
+        ]
+      },
+      {
+        "group_id": "g0142",
+        "count": 5,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "143.jpg",
+          "156.jpg",
+          "167.jpg",
+          "188.jpg",
+          "202.jpg"
+        ]
+      },
+      {
+        "group_id": "g0143",
+        "count": 6,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "144.jpg",
+          "157.jpg",
+          "168.jpg",
+          "178.jpg",
+          "189.jpg",
+          "203.jpg"
+        ]
+      },
+      {
+        "group_id": "g0144",
+        "count": 6,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "145.jpg",
+          "158.jpg",
+          "169.jpg",
+          "179.jpg",
+          "190.jpg",
+          "204.jpg"
+        ]
+      },
+      {
+        "group_id": "g0145",
+        "count": 6,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "146.jpg",
+          "159.jpg",
+          "170.jpg",
+          "180.jpg",
+          "191.jpg",
+          "205.jpg"
+        ]
+      },
+      {
+        "group_id": "g0147",
+        "count": 7,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "148.jpg",
+          "149.jpg",
+          "161.jpg",
+          "172.jpg",
+          "182.jpg",
+          "193.jpg",
+          "207.jpg"
+        ]
+      },
+      {
+        "group_id": "g0150",
+        "count": 3,
+        "exact_md5_copies": false,
+        "class_names": [
+          "Printed"
+        ],
+        "files": [
+          "151.jpg",
+          "196.jpg",
+          "209.jpg"
+        ]
+      }
+    ],
+    "near_duplicate_multi_groups": 14,
+    "group_count": 133,
+    "grouping_limitation": "Filenames are 1.jpg..N.jpg with no document/chart id. Splits are stratified (and group-aware only for near-duplicates). Many pages share hospital letterheads or lab-report templates; that template similarity can inflate random-split accuracy.",
+    "mixed_page_notes": "The dataset contains mixed pages: printed forms filled by hand, printed letterheads with handwritten notes, printed lab reports with signatures, and checkbox forms. Labels follow dominant page content in isPrinted.json, NOT 'any handwriting anywhere = Handwritten'. Signatures on otherwise printed reports are labeled Printed."
+  },
+  "splits": {
+    "train": {
+      "n": 158,
+      "class_counts": {
+        "Printed": 87,
+        "Handwritten": 71
+      }
+    },
+    "val": {
+      "n": 32,
+      "class_counts": {
+        "Printed": 16,
+        "Handwritten": 16
+      }
+    },
+    "test": {
+      "n": 20,
+      "class_counts": {
+        "Printed": 2,
+        "Handwritten": 18
+      }
+    }
+  },
+  "best_checkpoint": {
+    "macro_f1": 0.9687194525904204,
+    "accuracy": 0.96875,
+    "roc_auc": 0.99609375,
+    "epoch": 9,
+    "stage": "stage2"
+  },
+  "validation_metrics": {
+    "n": 32,
+    "accuracy": 0.96875,
+    "macro_f1": 0.9687194525904204,
+    "weighted_f1": 0.9687194525904204,
+    "per_class": {
+      "Printed": {
+        "precision": 1.0,
+        "recall": 0.9375,
+        "f1": 0.967741935483871,
+        "support": 16
+      },
+      "Handwritten": {
+        "precision": 0.9411764705882353,
+        "recall": 1.0,
+        "f1": 0.9696969696969697,
+        "support": 16
+      }
+    },
+    "class_distribution": {
+      "Printed": 16,
+      "Handwritten": 16
+    },
+    "confusion_matrix": [
+      [
+        15,
+        1
+      ],
+      [
+        0,
+        16
+      ]
+    ],
+    "classification_report": "              precision    recall  f1-score   support\n\n     Printed       1.00      0.94      0.97        16\n Handwritten       0.94      1.00      0.97        16\n\n    accuracy                           0.97        32\n   macro avg       0.97      0.97      0.97        32\nweighted avg       0.97      0.97      0.97        32\n",
+    "roc_auc": 0.99609375
+  },
+  "test_metrics": {
+    "n": 20,
+    "accuracy": 0.9,
+    "macro_f1": 0.803921568627451,
+    "weighted_f1": 0.9137254901960784,
+    "per_class": {
+      "Printed": {
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1": 0.6666666666666666,
+        "support": 2
+      },
+      "Handwritten": {
+        "precision": 1.0,
+        "recall": 0.8888888888888888,
+        "f1": 0.9411764705882353,
+        "support": 18
+      }
+    },
+    "class_distribution": {
+      "Printed": 2,
+      "Handwritten": 18
+    },
+    "confusion_matrix": [
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        16
+      ]
+    ],
+    "classification_report": "              precision    recall  f1-score   support\n\n     Printed       0.50      1.00      0.67         2\n Handwritten       1.00      0.89      0.94        18\n\n    accuracy                           0.90        20\n   macro avg       0.75      0.94      0.80        20\nweighted avg       0.95      0.90      0.91        20\n",
+    "roc_auc": 0.9444444444444444
+  },
+  "threshold_calibration": {
+    "threshold": 0.5,
+    "accuracy": 0.96875,
+    "macro_f1": 0.9687194525904204,
+    "min_class_f1": 0.967741935483871,
+    "printed_f1": 0.967741935483871,
+    "handwritten_f1": 0.9696969696969697,
+    "roc_auc": 0.99609375
+  },
+  "uncertain_calibration": {
+    "uncertain_margin": 0.12,
+    "uncertain_min_confidence": 0.55,
+    "coverage": 0.9375,
+    "certain_accuracy": 0.9666666666666667,
+    "n_uncertain": 2
+  },
+  "cross_validation": {
+    "folds": [
+      {
+        "fold": 1,
+        "n_train": 152,
+        "n_val": 38,
+        "accuracy": 1.0,
+        "macro_f1": 1.0,
+        "roc_auc": 1.0
+      },
+      {
+        "fold": 2,
+        "n_train": 152,
+        "n_val": 38,
+        "accuracy": 0.868421052631579,
+        "macro_f1": 0.8637992831541219,
+        "roc_auc": 0.9747899159663865
+      },
+      {
+        "fold": 3,
+        "n_train": 152,
+        "n_val": 38,
+        "accuracy": 0.8947368421052632,
+        "macro_f1": 0.8944444444444444,
+        "roc_auc": 0.9607843137254902
+      },
+      {
+        "fold": 4,
+        "n_train": 152,
+        "n_val": 38,
+        "accuracy": 0.9473684210526315,
+        "macro_f1": 0.9472222222222222,
+        "roc_auc": 0.9944444444444444
+      },
+      {
+        "fold": 5,
+        "n_train": 152,
+        "n_val": 38,
+        "accuracy": 0.9210526315789473,
+        "macro_f1": 0.9209979209979211,
+        "roc_auc": 0.9805555555555555
+      }
+    ],
+    "mean_accuracy": 0.9263157894736842,
+    "std_accuracy": 0.05061943174124036,
+    "mean_f1": 0.925292774163742,
+    "std_f1": 0.05199419422165307,
+    "mean_roc_auc": 0.9821148459383753,
+    "std_roc_auc": 0.015676218654432677,
+    "note": "Cross-validation uses the development set only. The held-out test split is never used here."
+  },
+  "handcrafted_feature_probe": {
+    "per_class": {
+      "Printed": {
+        "ink_density": {
+          "mean": 0.04597878456115723,
+          "std": 0.04582960195329983
+        },
+        "edge_density": {
+          "mean": 0.06296920776367188,
+          "std": 0.07910908884953577
+        },
+        "projection_cv": {
+          "mean": 2.9668239150196314,
+          "std": 0.8932929171192334
+        }
+      },
+      "Handwritten": {
+        "ink_density": {
+          "mean": 0.08759713172912598,
+          "std": 0.054601726552419586
+        },
+        "edge_density": {
+          "mean": 0.10732197761535645,
+          "std": 0.061079674864617406
+        },
+        "projection_cv": {
+          "mean": 1.2076811715960503,
+          "std": 0.3867614269019701
+        }
+      }
+    },
+    "recommendation": "Do not fuse handcrafted features. ConvNeXt already sees ink/edge/layout; these stats overlap enough that a hybrid head would add complexity without a clear generalization win on 210 images."
+  },
+  "error_analysis": {
+    "n_false_printed": 2,
+    "n_false_handwritten": 0,
+    "n_uncertain": 2
+  },
+  "limitations": [
+    "Only ~210 labeled English pages. Metrics have high variance and must not be quoted as 99% accuracy.",
+    "No document/chart grouping in filenames; similar letterheads/lab templates can leak across random splits.",
+    "Mixed pages exist; the model follows isPrinted.json dominant-content labels.",
+    "Held-out test set is small (~15%). Treat test numbers as a sanity check, not a production SLA."
+  ],
+  "recommended_data": "Add several hundred more diverse English pages: typed letters, forms without handwriting, cursive notes, printed EHR printouts, faxed pages, and mixed annotation pages with explicit labels.",
+  "train_seconds": 85.27369391600223
+}

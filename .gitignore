@@ -1,0 +1,63 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs / local outputs
+*.log
+output/
+**/output/
+**/debug/
+
+# Large ML weights / pickles (keep metadata JSON if needed)
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.pkl
+*.joblib
+*.h5
+*.onnx
+
+# Archives / dumps
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# Jupyter
+.ipynb_checkpoints/

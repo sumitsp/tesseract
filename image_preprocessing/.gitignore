@@ -1,0 +1,14 @@
+# Local package ignores (root .gitignore also covers these)
+__pycache__/
+*.pyc
+.venv/
+output/
+debug/
+*.log
+.DS_Store
+
+# Model weights — too large for GitHub; keep metadata.json tracked
+document_type/models/*.pth
+document_type/models/*.pt
+document_type/models/best_model.pth
+document_type/models/last_model.pth
