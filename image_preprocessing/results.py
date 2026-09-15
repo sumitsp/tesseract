@@ -60,9 +60,14 @@ class PageResult:
     document_type_method: str | None = None
     document_type_p_handwritten: float | None = None
 
-    rotation_angle: float | None = None
+    rotation_angle: float | None = None  # clockwise offset of content from upright
     rotation_confidence: float | None = None
-    rotation_status: str | None = None
+    rotation_status: str | None = None  # APPLIED | NOT_NEEDED | REJECTED | UNCERTAIN
+    rotation_residual_deg: float | None = None
+    """Stage 4A: measured off-axis angle in [-45, 45), reported even when the
+    quadrant could not be resolved, so a reviewer can see what was measured."""
+    rotation_quadrant_deg: int | None = None
+    """Stage 4B: quadrant from OSD, or blank when OSD would not commit."""
 
     mirror: str | None = None  # YES | NO | UNKNOWN
     mirror_confidence: float | None = None
@@ -71,6 +76,9 @@ class PageResult:
     tilt_angle: float | None = None
     tilt_confidence: float | None = None
     tilt_status: str | None = None
+    """APPLIED | NOT_NEEDED | REJECTED | UNCERTAIN | NOT_APPLIED, where
+    NOT_APPLIED means a tilt was measured but withheld because the page's
+    upright orientation was never confirmed."""
 
     final_status: str = "REVIEW_REQUIRED"
     warnings: str = ""

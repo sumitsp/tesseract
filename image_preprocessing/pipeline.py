@@ -42,13 +42,11 @@ from image_preprocessing.ingest.output_writer import (
 )
 from image_preprocessing.ingest.pdf_loader import is_pdf_file, load_pdf_pages
 from image_preprocessing.orientation.arbitrary_rotation import (
-    detect_arbitrary_rotation,
-    overlay_components,
+    detect_rotation,
+    overlay_ink,
 )
 from image_preprocessing.orientation.mirror_detector import detect_mirror
-from image_preprocessing.orientation.osd_direction import resolve_180
 from image_preprocessing.orientation.skew_detector import detect_skew
-from image_preprocessing.orientation.text_geometry import build_geometry
 from image_preprocessing.quality.quality_analyzer import analyze_quality
 from image_preprocessing.reporting.excel_report import write_excel_report
 from image_preprocessing.results import LoadedPage, PageResult
@@ -59,6 +57,7 @@ from image_preprocessing.utils.image_utils import (
     flip_horizontal,
     resize_max_dimension,
     rotate_bound,
+    rotate_lossless_ccw,
     save_png,
 )
 from image_preprocessing.validation.correction_validator import (
@@ -166,6 +165,21 @@ def _annotate(image: np.ndarray, text: str) -> np.ndarray:
     return vis
 
 
+def _apply_rotation(image: np.ndarray, rot) -> np.ndarray:
+    """Correct ``rot`` with exactly one resampling pass, or none at all.
+
+    The quadrant turn goes through ``cv2.rotate`` (a transpose and flip, exactly
+    lossless), so a page that is only a quarter or half turn out costs no
+    interpolation whatsoever. Only a genuine off-axis residual triggers a warp,
+    and then just once, on an expanded canvas so nothing is cropped.
+    """
+    out = rotate_lossless_ccw(image, int(rot.quadrant_deg or 0))
+    residual = float(rot.residual_component_deg or 0.0)
+    if abs(residual) > 0.05:
+        out = rotate_bound(out, residual, interpolation=INTER_FINAL)
+    return out
+
+
 def process_page(
     page: LoadedPage,
     config: PipelineConfig,
@@ -237,169 +251,141 @@ def process_page(
     if dtype.error:
         result.add_warning(f"Document type error: {dtype.error}")
 
-    upright = working
     rotation_applied = 0.0
     mirror_applied = False
     tilt_applied = 0.0
-    rotation_ok_for_later = False
 
-    # 4. Arbitrary rotation + OSD 180°
-    bundle = build_geometry(working, config.analysis_max_dimension)
-    if debug_dir is not None:
-        _save_debug(debug_dir, "text_components.png", overlay_components(bundle.gray, bundle, None))
+    # 4. Rotation: residual sweep (4A) then OSD quadrant (4B)
+    rotation_debug: dict = {}
+    rot = detect_rotation(working, config, debug=rotation_debug)
+    result.rotation_confidence = rot.confidence
+    result.rotation_residual_deg = rot.residual_deg
+    result.rotation_quadrant_deg = rot.quadrant_deg
+    if rot.warning:
+        result.add_warning(rot.warning)
+    if debug_dir is not None and "ink" in rotation_debug:
+        _save_debug(
+            debug_dir,
+            "text_components.png",
+            overlay_ink(
+                _analysis_copy(working, config),
+                rotation_debug["ink"],
+                f"residual={rot.residual_deg} quadrant={rot.quadrant_deg}",
+            ),
+        )
 
-    geom = detect_arbitrary_rotation(bundle, config)
-    result.rotation_confidence = geom.confidence
-    if geom.warning:
-        result.add_warning(geom.warning)
+    # Only a confirmed upright page earns the mirror and tilt stages. Both are
+    # defined on upright geometry, and acting on an unconfirmed orientation is
+    # how a page ends up more crooked than it started.
+    orientation_confirmed = False
 
-    if geom.status != "DETECTED" or geom.angle_deg is None:
+    if rot.status == "UNCERTAIN":
         result.rotation_angle = None
         result.rotation_status = "UNCERTAIN"
-        result.mirror = "UNKNOWN"
-        result.mirror_corrected = "NO"
-        result.tilt_angle = None
-        result.tilt_status = "UNCERTAIN"
-        result.add_warning("Rotation could not be determined confidently")
+    elif rot.status == "NOT_NEEDED":
+        result.rotation_angle = 0.0
+        result.rotation_status = "NOT_NEEDED"
+        orientation_confirmed = True
     else:
-        aligned_small = rotate_bound(
-            _analysis_copy(working, config),
-            geom.angle_deg,
-            interpolation=INTER_FINAL,
-        )
-        osd = resolve_180(aligned_small, geom.angle_deg, config)
-        if osd.status != "RESOLVED" or osd.rotation_angle is None:
-            # Keep the geometric confidence. Do not report 0 just because OSD
-            # could not run; the 180° question is unresolved, so the angle
-            # stays null.
-            result.rotation_confidence = round(float(geom.confidence), 4)
-            result.rotation_angle = None
-            result.rotation_status = "UNCERTAIN"
-            result.add_warning("Rotation could not be determined confidently")
-            if osd.warning and osd.warning not in result.warning_list:
-                result.add_warning(osd.warning)
-            if osd.diagnostics.get("reason") == "osd_unavailable":
-                result.add_warning("Tesseract OSD unavailable; 180-degree ambiguity unresolved")
-            result.mirror = "UNKNOWN"
-            result.mirror_corrected = "NO"
-            # Lines may still be near-horizontal (geom snapped to 0). Skew can run.
-            rotation_ok_for_later = abs(float(geom.angle_deg)) < 0.2
-            if not rotation_ok_for_later:
-                result.tilt_angle = None
-                result.tilt_status = "UNCERTAIN"
+        candidate = _apply_rotation(working, rot)
+        validation = validate_candidate(working, candidate, config)
+        if validation.accepted:
+            working = candidate
+            rotation_applied = float(rot.angle_cw_deg or 0.0)
+            result.rotation_angle = round(rotation_applied, 2)
+            result.rotation_status = "APPLIED"
+            orientation_confirmed = True
         else:
-            candidate_angle = float(osd.rotation_angle)
-            result.rotation_confidence = round(float(min(geom.confidence, osd.confidence)), 4)
-            if osd.warning:
-                result.add_warning(osd.warning)
-            if abs(candidate_angle) < 0.2 or abs(candidate_angle - 360) < 0.2:
-                result.rotation_angle = 0.0
-                result.rotation_status = "NOT_NEEDED"
-                rotation_ok_for_later = True
-            else:
-                candidate = rotate_bound(working, candidate_angle, interpolation=INTER_FINAL)
-                validation = validate_candidate(working, candidate, config)
-                cropped_ok = content_not_cropped(working.shape, candidate.shape)
-                if validation.accepted and cropped_ok:
-                    upright = candidate
-                    working = candidate
-                    rotation_applied = candidate_angle
-                    result.rotation_angle = round(candidate_angle, 2)
-                    result.rotation_status = "APPLIED"
-                    rotation_ok_for_later = True
-                else:
-                    result.rotation_angle = None
-                    result.rotation_status = "REJECTED"
-                    result.add_warning("Rotation rejected by validation; page preserved")
-                    rotation_ok_for_later = abs(float(geom.angle_deg)) < 0.2
-
-        if debug_dir is not None:
-            _save_debug(
-                debug_dir,
-                "orientation_analysis.png",
-                overlay_components(bundle.gray, bundle, geom.angle_deg),
-            )
-            _save_debug(
-                debug_dir,
-                "rotation_result.png",
-                _annotate(
-                    _analysis_copy(upright, config),
-                    f"rot={result.rotation_angle} {result.rotation_status}",
-                ),
+            result.rotation_angle = None
+            result.rotation_status = "REJECTED"
+            result.add_warning(
+                f"Rotation rejected by validation ({validation.reason}); page preserved"
             )
 
-    # 5. Mirror — only after a trustworthy upright orientation
-    if rotation_ok_for_later:
-        mirror = detect_mirror(upright, config)
-        result.mirror_confidence = mirror.confidence
+    if debug_dir is not None:
+        _save_debug(
+            debug_dir,
+            "rotation_result.png",
+            _annotate(
+                _analysis_copy(working, config),
+                f"rot={result.rotation_angle} {result.rotation_status}",
+            ),
+        )
+
+    # 5. Mirror — upright page only, and biased hard towards leaving it alone
+    if orientation_confirmed:
+        mirror = detect_mirror(working, config)
         result.mirror = mirror.mirror
-        result.mirror_corrected = "YES" if mirror.corrected else "NO"
+        result.mirror_confidence = mirror.confidence
+        result.mirror_corrected = "NO"
         if mirror.warning:
             result.add_warning(mirror.warning)
         if mirror.corrected:
-            candidate = flip_horizontal(upright)
-            # Mirror should not wreck line alignment; require it not to get worse.
-            validation = validate_candidate(
-                upright, candidate, config, min_improvement_ratio=0.08
-            )
-            if validation.accepted or validation.after_score >= validation.before_score * 0.97:
-                upright = candidate
+            candidate = flip_horizontal(working)
+            validation = validate_candidate(working, candidate, config)
+            if validation.accepted:
                 working = candidate
                 mirror_applied = True
+                result.mirror_corrected = "YES"
             else:
                 result.mirror = "UNKNOWN"
-                result.mirror_corrected = "NO"
                 result.add_warning("Mirror rejected by validation; page not flipped")
-        if debug_dir is not None:
-            _save_debug(
-                debug_dir,
-                "mirror_result.png",
-                _annotate(
-                    _analysis_copy(upright, config),
-                    f"mirror={result.mirror} corr={result.mirror_corrected}",
-                ),
-            )
-
-        # 6. Fine tilt / skew
-        skew = detect_skew(upright, config)
-        result.tilt_confidence = skew.confidence
-        result.tilt_status = skew.status
-        if skew.warning:
-            result.add_warning(skew.warning)
-        if skew.status == "DETECTED" and skew.tilt_angle is not None:
-            if abs(skew.tilt_angle) < config.skew_min_abs_to_apply:
-                result.tilt_angle = 0.0
-            else:
-                candidate = rotate_bound(upright, float(skew.tilt_angle), interpolation=INTER_FINAL)
-                validation = validate_candidate(upright, candidate, config)
-                if validation.accepted:
-                    upright = candidate
-                    working = candidate
-                    tilt_applied = float(skew.tilt_angle)
-                    result.tilt_angle = round(float(skew.tilt_angle), 2)
-                    result.tilt_status = "APPLIED"
-                else:
-                    result.tilt_angle = None
-                    result.tilt_status = "REJECTED"
-                    result.add_warning("Tilt rejected by validation; page preserved")
-        elif skew.status == "UNCERTAIN":
-            result.tilt_angle = None
-        if debug_dir is not None:
-            _save_debug(
-                debug_dir,
-                "skew_result.png",
-                _annotate(
-                    _analysis_copy(upright, config),
-                    f"tilt={result.tilt_angle} {result.tilt_status}",
-                ),
-            )
     else:
-        if result.mirror is None:
-            result.mirror = "UNKNOWN"
-            result.mirror_corrected = "NO"
-        if result.tilt_status is None:
+        result.mirror = "UNKNOWN"
+        result.mirror_corrected = "NO"
+        result.mirror_confidence = None
+
+    if debug_dir is not None:
+        _save_debug(
+            debug_dir,
+            "mirror_result.png",
+            _annotate(
+                _analysis_copy(working, config),
+                f"mirror={result.mirror} corrected={result.mirror_corrected}",
+            ),
+        )
+
+    # 6. Fine tilt / skew
+    skew = detect_skew(working, config)
+    result.tilt_confidence = skew.confidence
+    if skew.warning:
+        result.add_warning(skew.warning)
+
+    if not orientation_confirmed:
+        # Measured and reported so the column is informative, but never applied:
+        # a tilt about the wrong axis is meaningless on a page whose upright
+        # orientation was never confirmed.
+        result.tilt_angle = skew.tilt_cw_deg
+        result.tilt_status = "NOT_APPLIED"
+        result.add_warning("Tilt not applied: page orientation was not confirmed")
+    elif skew.status == "UNCERTAIN":
+        result.tilt_angle = None
+        result.tilt_status = "UNCERTAIN"
+    elif skew.status == "NOT_NEEDED":
+        result.tilt_angle = 0.0
+        result.tilt_status = "NOT_NEEDED"
+    else:
+        candidate = rotate_bound(working, float(skew.tilt_cw_deg), interpolation=INTER_FINAL)
+        validation = validate_candidate(working, candidate, config)
+        if validation.accepted:
+            working = candidate
+            tilt_applied = float(skew.tilt_cw_deg)
+            result.tilt_angle = round(tilt_applied, 2)
+            result.tilt_status = "APPLIED"
+        else:
             result.tilt_angle = None
-            result.tilt_status = "UNCERTAIN"
+            result.tilt_status = "REJECTED"
+            result.add_warning("Tilt rejected by validation; page preserved")
+
+    if debug_dir is not None:
+        _save_debug(
+            debug_dir,
+            "skew_result.png",
+            _annotate(
+                _analysis_copy(working, config),
+                f"tilt={result.tilt_angle} {result.tilt_status}",
+            ),
+        )
 
     # 7. Final validation of the composed high-res result vs pre-geometry image
     if working is not original_working:
@@ -432,8 +418,8 @@ def process_page(
     result.output_file = str(output_path)
 
     uncertain = (
-        result.rotation_status == "UNCERTAIN"
-        or result.tilt_status == "UNCERTAIN"
+        result.rotation_status in {"UNCERTAIN", "REJECTED"}
+        or result.tilt_status in {"UNCERTAIN", "REJECTED", "NOT_APPLIED"}
         or result.mirror == "UNKNOWN"
         or result.document_type in {"UNCERTAIN", "ERROR"}
         or (result.quality_score is not None and result.quality_score < config.quality_review_threshold)

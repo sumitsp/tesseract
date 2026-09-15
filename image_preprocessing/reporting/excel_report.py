@@ -35,6 +35,8 @@ COLUMNS = [
     ("rotation_angle", 16),
     ("rotation_confidence", 20),
     ("rotation_status", 18),
+    ("rotation_residual_deg", 22),
+    ("rotation_quadrant_deg", 22),
     ("mirror", 12),
     ("mirror_confidence", 18),
     ("mirror_corrected", 18),
@@ -97,7 +99,7 @@ def _write_pages_sheet(ws: Worksheet, results: list[PageResult]) -> None:
     ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{max(2, len(results) + 1)}"
     ws.row_dimensions[1].height = 22
 
-    angle_cols = {"rotation_angle", "tilt_angle"}
+    angle_cols = {"rotation_angle", "tilt_angle", "rotation_residual_deg"}
     conf_cols = {
         "rotation_confidence",
         "mirror_confidence",
@@ -158,6 +160,10 @@ def _write_pages_sheet(ws: Worksheet, results: list[PageResult]) -> None:
         CellIsRule(operator="equal", formula=['"UNCERTAIN"'], fill=WARN_FILL),
     )
     ws.conditional_formatting.add(
+        f"{tilt_status}2:{tilt_status}{last_row}",
+        CellIsRule(operator="equal", formula=['"NOT_APPLIED"'], fill=WARN_FILL),
+    )
+    ws.conditional_formatting.add(
         f"{mirror_col}2:{mirror_col}{last_row}",
         CellIsRule(operator="equal", formula=['"UNKNOWN"'], fill=WARN_FILL),
     )
@@ -212,11 +218,16 @@ def _write_summary_sheet(ws: Worksheet, results: list[PageResult], quality_thres
         ("Mirrored pages", _count(results, lambda r: r.mirror_corrected == "YES")),
         (
             "Deskewed pages",
-            _count(results, lambda r: r.tilt_angle is not None and abs(float(r.tilt_angle)) >= 0.2),
+            _count(results, lambda r: r.tilt_status == "APPLIED"),
         ),
         ("Rotation uncertain", _count(results, lambda r: r.rotation_status == "UNCERTAIN")),
+        ("Rotation rejected by validation", _count(results, lambda r: r.rotation_status == "REJECTED")),
         ("Mirror uncertain", _count(results, lambda r: r.mirror == "UNKNOWN")),
         ("Tilt uncertain", _count(results, lambda r: r.tilt_status == "UNCERTAIN")),
+        (
+            "Tilt withheld (orientation unconfirmed)",
+            _count(results, lambda r: r.tilt_status == "NOT_APPLIED"),
+        ),
     ]
 
     header_font = Font(bold=True, color="FFFFFF", name="Calibri")

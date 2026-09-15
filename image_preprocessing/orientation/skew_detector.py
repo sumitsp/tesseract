@@ -1,210 +1,156 @@
-"""Stage 6 — fine tilt / skew AFTER rotation and mirror.
+"""Stage 6 — fine tilt / skew, after rotation and mirror.
 
-The page is assumed approximately upright. This is not arbitrary rotation.
-Search is limited to [-MAX_SKEW_ANGLE, +MAX_SKEW_ANGLE] (default ±10°).
+The page is upright by now, so this is the classical deskew problem: find the
+small angle that flattens text lines. Two things make it better conditioned than
+the stage-4 residual search, and both are the reason a residual inside
+``max_skew_angle`` is deferred to here rather than corrected as rotation:
 
-Primary evidence: text-line fits, horizontal projection-profile search,
-connected-component alignment. Hough lines are supporting validation only
-and page borders are suppressed.
+  * the quadrant is settled, so the score can use the horizontal projection
+    alone (``line_score``) instead of the quadrant-blind ``max(y, x)``. Half the
+    score's freedom to be fooled disappears with it.
+  * the search spans only +/-``max_skew_angle``, so a rival structure 30 degrees
+    away cannot win.
 
-Positive tilt = clockwise lean of content (y-down image coordinates).
-Correction rotates the image CCW by that amount (OpenCV +tilt).
+Page borders are deliberately not used. Tables, stamps, signatures and scanner
+edges all produce long straight lines that are not text baselines; the ink mask
+from ``angle_search.text_ink`` has already dropped every page-scale component,
+so what is measured here is glyph ink only.
+
+A tilt is reported only when the sweep is decisive; otherwise the page is left
+alone and the row records UNCERTAIN. Text-line grouping supplies an independent
+cross-check on the projection answer, and disagreement lowers confidence rather
+than overriding it.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
 
-import cv2
 import numpy as np
 
 from image_preprocessing.config import PipelineConfig
+from image_preprocessing.orientation.angle_search import (
+    AngleEstimate,
+    line_score,
+    search,
+    text_ink,
+)
 from image_preprocessing.orientation.text_geometry import (
-    extract_ink,
     extract_text_components,
     group_text_lines,
-    projection_score_at_angle,
 )
-from image_preprocessing.utils.image_utils import resize_max_dimension, to_gray
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
 class SkewResult:
-    tilt_angle: float | None
-    confidence: float | None
-    status: str  # DETECTED | UNCERTAIN | SKIPPED
+    status: str  # DETECTED | NOT_NEEDED | UNCERTAIN
+    tilt_cw_deg: float | None
+    confidence: float
     warning: str | None = None
-    diagnostics: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
 
-def _component_line_tilt(ink: np.ndarray) -> tuple[float | None, float]:
+def _text_line_tilt(ink: np.ndarray, limit: float) -> tuple[float | None, int]:
+    """Median slope of grouped text lines — an independent second opinion.
+
+    Returns (angle_cw, n_lines_used). Robust median with MAD rejection so a few
+    mis-grouped lines cannot move the answer.
+    """
     comps = extract_text_components(ink)
     lines = group_text_lines(comps, min_comps=4)
-    if len(lines) < 3:
-        return None, 0.0
     angles = np.array([ln.angle_deg for ln in lines], dtype=np.float64)
-    angles = angles[np.abs(angles) <= 15]
+    angles = angles[np.abs(angles) <= limit]
     if len(angles) < 3:
-        return None, 0.0
-    med = float(np.median(angles))
-    mad = float(np.median(np.abs(angles - med))) + 1e-6
-    inliers = angles[np.abs(angles - med) <= 2.5 * mad]
+        return None, int(len(angles))
+    median = float(np.median(angles))
+    mad = float(np.median(np.abs(angles - median))) + 1e-6
+    inliers = angles[np.abs(angles - median) <= 2.5 * mad]
     if len(inliers) < 3:
-        return None, 0.0
-    conf = float(np.clip(0.25 + 0.05 * len(inliers), 0.0, 1.0))
-    return float(np.median(inliers)), conf
+        return None, int(len(inliers))
+    return float(np.median(inliers)), int(len(inliers))
 
 
-def _hough_support(gray: np.ndarray) -> tuple[float | None, float]:
-    edges = cv2.Canny(gray, 50, 150)
-    h, w = edges.shape
-    m = max(3, int(0.03 * min(h, w)))
-    edges[:m, :] = 0
-    edges[-m:, :] = 0
-    edges[:, :m] = 0
-    edges[:, -m:] = 0
-    min_len = max(30, w // 6)
-    lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180.0, threshold=80, minLineLength=min_len, maxLineGap=10
-    )
-    if lines is None:
-        return None, 0.0
-    angles: list[float] = []
-    weights: list[float] = []
-    for x1, y1, x2, y2 in lines.reshape(-1, 4):
-        dx = int(x2) - int(x1)
-        dy = int(y2) - int(y1)
-        length = float(np.hypot(dx, dy))
-        if length < min_len:
-            continue
-        y_mid = 0.5 * (y1 + y2)
-        if length > 0.85 * w and (y_mid < 0.08 * h or y_mid > 0.92 * h):
-            continue
-        raw = float(np.degrees(np.arctan2(dy, dx)))
-        if abs(raw) > 20:
-            continue
-        angles.append(raw)
-        weights.append(length)
-    if len(angles) < 5:
-        return None, 0.0
-    ang = np.array(angles, dtype=np.float64)
-    wts = np.array(weights, dtype=np.float64)
-    order = np.argsort(ang)
-    ang_s, w_s = ang[order], wts[order]
-    cdf = np.cumsum(w_s)
-    median = float(ang_s[np.searchsorted(cdf, 0.5 * cdf[-1])])
-    frac = float(np.mean(np.abs(ang - median) <= 2.0))
-    if frac < 0.45:
-        return None, 0.0
-    conf = float(np.clip(0.2 + 0.6 * frac + 0.01 * min(len(angles), 40), 0.0, 1.0))
-    return median, conf
+def _confidence(est: AngleEstimate, line_angle: float | None, n_lines: int) -> tuple[float, dict]:
+    margin_term = float(np.clip((est.peak_margin - 0.20) / 0.35, 0.0, 1.0))
+    rivalry_term = float(np.clip((0.995 - est.runner_up_ratio) / 0.045, 0.0, 1.0))
+    evidence_term = float(np.clip(est.n_points / 5000.0, 0.0, 1.0))
+    conf = 0.50 * margin_term + 0.25 * rivalry_term + 0.15 * evidence_term
 
-
-def _projection_search(ink: np.ndarray, seed: float, config: PipelineConfig) -> tuple[float, float]:
-    max_a = float(config.max_skew_angle)
-    lo = max(-max_a, seed - max_a)
-    hi = min(max_a, seed + max_a)
-    best_a, best_s = seed, projection_score_at_angle(ink, seed)
-    a = lo
-    while a <= hi + 1e-9:
-        s = projection_score_at_angle(ink, float(a))
-        if s > best_s:
-            best_s, best_a = s, float(a)
-        a += config.skew_coarse_step_deg
-    fine_lo = max(-max_a, best_a - config.skew_coarse_step_deg)
-    fine_hi = min(max_a, best_a + config.skew_coarse_step_deg)
-    a = fine_lo
-    while a <= fine_hi + 1e-9:
-        s = projection_score_at_angle(ink, float(a))
-        if s > best_s:
-            best_s, best_a = s, float(a)
-        a += config.skew_fine_step_deg
-    neighbor = [
-        projection_score_at_angle(ink, best_a - 0.5),
-        projection_score_at_angle(ink, best_a + 0.5),
-    ]
-    conf = float(np.clip((best_s - float(np.mean(neighbor))) / (best_s + 1e-9) * 2.0, 0.0, 1.0))
-    return float(best_a), conf
-
-
-def detect_skew(upright_image: np.ndarray, config: PipelineConfig) -> SkewResult:
-    gray = to_gray(upright_image)
-    analysis, _ = resize_max_dimension(gray, config.analysis_max_dimension)
-    _clahe, _ink, ink = extract_ink(analysis)
-
-    line_a, line_c = _component_line_tilt(ink)
-    hough_a, hough_c = _hough_support(analysis)
-    diag: dict[str, Any] = {
-        "line_tilt": line_a,
-        "line_conf": line_c,
-        "hough_tilt": hough_a,
-        "hough_conf": hough_c,
-        "note": "Hough is supporting validation only; text-line evidence is primary.",
+    agreement = None
+    if line_angle is not None and est.angle_cw_deg is not None:
+        agreement = abs(line_angle - est.angle_cw_deg)
+        # Independent confirmation is worth a real boost; open disagreement
+        # between two different measurements of the same quantity is a reason
+        # to abstain, not to pick one.
+        if agreement <= 1.0:
+            conf += 0.10
+        elif agreement > 3.0:
+            conf = min(conf, 0.45)
+    return float(np.clip(conf, 0.0, 1.0)), {
+        "line_tilt": line_angle,
+        "line_count": n_lines,
+        "line_agreement_deg": agreement,
     }
 
-    if line_a is None and hough_a is None:
-        return SkewResult(
-            tilt_angle=None,
-            confidence=0.0,
-            status="UNCERTAIN",
-            warning="Tilt could not be determined confidently",
-            diagnostics=diag,
-        )
 
-    seed = float(line_a if line_a is not None else hough_a)
-    refined, refine_c = _projection_search(ink, seed, config)
-    diag["seed"] = seed
-    diag["refined"] = refined
-    diag["refine_conf"] = refine_c
+def detect_skew(image: np.ndarray, config: PipelineConfig) -> SkewResult:
+    """Residual clockwise tilt of an already-upright page."""
+    ink = text_ink(image, config.analysis_max_dimension)
+    limit = float(config.max_skew_angle)
 
-    # If Hough and text-lines exist, they must not strongly disagree.
-    if line_a is not None and hough_a is not None and abs(line_a - hough_a) > 3.5:
-        return SkewResult(
-            tilt_angle=None,
-            confidence=round(min(0.4, 0.5 * (line_c + hough_c)), 4),
-            status="UNCERTAIN",
-            warning="Tilt could not be determined confidently",
-            diagnostics={**diag, "reason": "line_hough_disagreement"},
-        )
-
-    conf = float(
-        np.clip(
-            0.45 * (line_c if line_a is not None else 0.3)
-            + 0.20 * (hough_c if hough_a is not None else 0.2)
-            + 0.35 * refine_c,
-            0.0,
-            1.0,
-        )
+    est = search(
+        ink,
+        lo=-limit,
+        hi=limit + 1e-9,
+        coarse_step=config.skew_coarse_step_deg,
+        fine_steps=(0.1, config.skew_fine_step_deg),
+        scorer=line_score,
     )
-    if abs(refined) > config.max_skew_angle:
+    line_angle, n_lines = _text_line_tilt(ink, limit)
+    confidence, cross = _confidence(est, line_angle, n_lines)
+
+    diagnostics = {
+        "tilt_raw": est.angle_cw_deg,
+        "peak_margin": round(est.peak_margin, 4),
+        "runner_up_ratio": round(est.runner_up_ratio, 4),
+        "ink_points": est.n_points,
+        **cross,
+        **est.diagnostics,
+    }
+
+    if est.angle_cw_deg is None:
         return SkewResult(
-            tilt_angle=None,
-            confidence=round(conf, 4),
             status="UNCERTAIN",
+            tilt_cw_deg=None,
+            confidence=0.0,
             warning="Tilt could not be determined confidently",
-            diagnostics={**diag, "reason": "outside_search_range"},
+            diagnostics=diagnostics,
         )
-    if conf < config.skew_confidence_threshold:
+
+    if confidence < config.skew_confidence_threshold:
         return SkewResult(
-            tilt_angle=None,
-            confidence=round(conf, 4),
             status="UNCERTAIN",
+            tilt_cw_deg=None,
+            confidence=round(confidence, 4),
             warning="Tilt could not be determined confidently",
-            diagnostics=diag,
+            diagnostics=diagnostics,
         )
-    if abs(refined) < config.skew_min_abs_to_apply:
+
+    tilt = float(est.angle_cw_deg)
+    if abs(tilt) < config.skew_min_abs_to_apply:
         return SkewResult(
-            tilt_angle=0.0,
-            confidence=round(max(conf, 0.7), 4),
-            status="DETECTED",
-            warning=None,
-            diagnostics={**diag, "reason": "below_apply_threshold_treated_as_zero"},
+            status="NOT_NEEDED",
+            tilt_cw_deg=0.0,
+            confidence=round(confidence, 4),
+            diagnostics=diagnostics,
         )
+
     return SkewResult(
-        tilt_angle=round(float(refined), 2),
-        confidence=round(conf, 4),
         status="DETECTED",
-        warning=None,
-        diagnostics=diag,
+        tilt_cw_deg=round(tilt, 3),
+        confidence=round(confidence, 4),
+        diagnostics=diagnostics,
     )

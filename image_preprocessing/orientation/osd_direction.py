@@ -1,234 +1,151 @@
-"""Stage 4B — resolve the 180° ambiguity.
+"""Which quadrant is the page in? Tesseract OSD, on an axis-aligned page.
 
-Text-line geometry cannot tell 120° from 300°. After the geometric detector
-has aligned lines to (approximately) horizontal, this stage asks: is the
-page upright, or upside down?
+Stage 4B. The projection search in ``arbitrary_rotation`` measures how far the
+page is off-axis but cannot tell 0 from 90, 180 or 270: ink geometry is
+symmetric under quarter turns, and text-line geometry is symmetric under a half
+turn. Deciding which way is *up* needs character shapes, which is what OSD does.
 
-Primary signal: Tesseract OSD (orientation only — never used to estimate the
-arbitrary angle itself). Full OCR is not run.
+Why OSD owns this decision outright
+-----------------------------------
+Ink-geometry heuristics for the quadrant were measured twice and failed twice.
+The detector in the sibling ``model-repo`` project recovered 0 of 6 sideways
+pages and reported confidence 1.000 on the wrong answers. A rewrite here that
+led with geometry and used OSD only as a tie-break landed 1 of 100 client pages
+correctly. OSD, given an axis-aligned page, was exact on every page tried.
 
-Fallback (when Tesseract is missing / OSD fails): classical per-line
-ascender/descender-style votes from glyph components. This is conservative;
-if the fallback is also ambiguous the pipeline abstains rather than guessing.
+So there is no geometric fallback for the quadrant. When OSD will not answer,
+the page keeps its orientation and the row is marked uncertain. A confidently
+wrong quarter turn is far worse than an uncorrected page, and the geometric
+"answer" available here is not better than a coin flip.
+
+Confidence gate
+---------------
+``orientation_conf`` is an open-ended float. Calibrated over 500 page/angle
+combinations (50 oracle-verified upright pages x 10 synthetic rotations):
+
+    threshold   coverage   wrong quadrant
+        1.0        90%          23          <- value used by model-repo
+        3.0        76%           7
+        4.0        67%           1
+        5.0        62%           0
+
+Every wrong answer was exactly 180 degrees off and every one scored under 4.2.
+They cluster on handwritten pages where print bled through from the reverse
+side: OSD reads the upside-down bleed-through, which is genuinely the only
+printed text on the page. 5.0 buys zero quadrant errors for ~28 points of
+coverage, and abstaining costs only an uncorrected page.
+
+Convention, verified rather than assumed
+----------------------------------------
+``image_to_osd`` reports ``rotate`` as the CLOCKWISE rotation to APPLY to make
+the page upright, so the content's own clockwise offset is its complement::
+
+    content 0 CW   -> rotate 0        content 180 CW -> rotate 180
+    content 90 CW  -> rotate 270      content 270 CW -> rotate 90
+
+    content_cw = (360 - rotate) % 360
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 
-from image_preprocessing.config import PipelineConfig
-from image_preprocessing.orientation.text_geometry import (
-    extract_ink,
-    extract_text_components,
-    group_text_lines,
-)
-from image_preprocessing.utils.image_utils import (
-    INTER_DOWNSAMPLE,
-    bgr_to_pil,
-    ensure_bgr,
-    resize_max_dimension,
-    to_gray,
-)
-
 LOGGER = logging.getLogger(__name__)
+
+# OSD needs glyphs to vote on; a near-blank page yields a confident nonsense
+# answer, so dividers and blank backs do not get spun around.
+MIN_INK_FRACTION = 0.002
 
 
 @dataclass
-class OsdDirectionResult:
-    rotation_angle: float | None  # final clockwise content offset in [0, 360)
-    osd_rotate: int | None
-    osd_orientation: int | None
-    osd_confidence: float | None
+class QuadrantResult:
+    status: str  # RESOLVED | UNRESOLVED
+    content_cw: int | None
     confidence: float
-    status: str  # RESOLVED | UNCERTAIN
+    """Raw Tesseract ``orientation_conf``, not rescaled — the thresholds in
+    config are expressed on this same open-ended scale."""
+    script: str = ""
     warning: str | None = None
-    diagnostics: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
 
-def _run_osd(image: np.ndarray) -> dict[str, Any] | None:
-    try:
-        import pytesseract
-    except Exception as exc:
-        LOGGER.warning("pytesseract is not available for OSD: %s", exc)
-        return None
-    work, _ = resize_max_dimension(ensure_bgr(image), 1000, interpolation=INTER_DOWNSAMPLE)
-    pil = bgr_to_pil(work)
-    try:
-        osd = pytesseract.image_to_osd(pil, output_type=pytesseract.Output.DICT)
-        return osd
-    except Exception as exc:
-        LOGGER.warning("Tesseract OSD failed: %s", exc)
-        return None
-
-
-def _line_updown_votes(image: np.ndarray) -> tuple[int, int, dict[str, Any]]:
-    """Classical 180° vote after lines are already near-horizontal.
-
-    Latin text tends to keep small marks (periods, commas) near the baseline
-    (bottom of each line box). Returns (votes_upright, votes_upside_down, diag).
-    """
-    gray = to_gray(image)
-    analysis, _ = resize_max_dimension(gray, 1200, interpolation=INTER_DOWNSAMPLE)
-    _clahe, _ink, ink = extract_ink(analysis)
-    comps = extract_text_components(ink)
-    lines = group_text_lines(comps, min_comps=3)
-    upright = 0
-    upside = 0
-    for line in lines:
-        if len(line.components) < 4:
-            continue
-        heights = np.array([c.h for c in line.components], dtype=np.float64)
-        med_h = float(np.median(heights))
-        if med_h <= 0:
-            continue
-        small = [c for c in line.components if c.h <= med_h * 0.6]
-        if len(small) < 2:
-            continue
-        y_top = min(c.y for c in line.components)
-        y_bot = max(c.y + c.h for c in line.components)
-        mid = (y_top + y_bot) / 2.0
-        lower = sum(1 for c in small if c.cy > mid)
-        upper = len(small) - lower
-        if lower == upper:
-            continue
-        if lower > upper:
-            upright += 1
-        else:
-            upside += 1
-    return upright, upside, {"n_lines": len(lines), "n_comps": len(comps)}
-
-
-def _resolve_with_geometry_fallback(
-    geometric_angle_180: float,
-    aligned_image: np.ndarray,
-    *,
-    reason: str,
-) -> OsdDirectionResult:
-    upright, upside, vote_diag = _line_updown_votes(aligned_image)
-    total = upright + upside
-    diag = {
-        "reason": reason,
-        "fallback": "line_updown_votes",
-        "upright_votes": upright,
-        "upside_votes": upside,
-        **vote_diag,
-        "geometric_angle_180": geometric_angle_180,
-    }
-    # Need a clear majority on enough independent lines.
-    if total < 3:
-        return OsdDirectionResult(
-            rotation_angle=None,
-            osd_rotate=None,
-            osd_orientation=None,
-            osd_confidence=None,
-            confidence=0.2,
-            status="UNCERTAIN",
-            warning="Rotation could not be determined confidently",
-            diagnostics={**diag, "fallback_result": "insufficient_votes"},
-        )
-    margin = abs(upright - upside) / float(total)
-    if margin < 0.30:
-        return OsdDirectionResult(
-            rotation_angle=None,
-            osd_rotate=None,
-            osd_orientation=None,
-            osd_confidence=None,
-            confidence=round(float(0.35 * margin), 4),
-            status="UNCERTAIN",
-            warning="Rotation could not be determined confidently",
-            diagnostics={**diag, "fallback_result": "ambiguous_votes"},
-        )
-
-    add_180 = upside > upright
-    final = (float(geometric_angle_180) + (180.0 if add_180 else 0.0)) % 360.0
-    conf = float(np.clip(0.50 + 0.45 * margin, 0.0, 0.92))
-    warning = None
-    if reason == "osd_unavailable":
-        warning = "Tesseract OSD unavailable; used classical 180-degree fallback"
-    return OsdDirectionResult(
-        rotation_angle=round(final, 2),
-        osd_rotate=180 if add_180 else 0,
-        osd_orientation=None,
-        osd_confidence=None,
-        confidence=round(conf, 4),
-        status="RESOLVED",
+def _unresolved(reason: str, *, confidence: float = 0.0, warning: str | None = None) -> QuadrantResult:
+    return QuadrantResult(
+        status="UNRESOLVED",
+        content_cw=None,
+        confidence=float(confidence),
         warning=warning,
-        diagnostics={**diag, "fallback_result": "resolved", "add_180": add_180},
+        diagnostics={"reason": reason},
     )
 
 
-def resolve_180(
-    aligned_image: np.ndarray,
-    geometric_angle_180: float,
-    config: PipelineConfig,
-) -> OsdDirectionResult:
-    """``aligned_image`` has already been rotated CCW by ``geometric_angle_180``.
+def detect_quadrant(
+    axis_aligned_image: np.ndarray,
+    ink: np.ndarray | None,
+    min_confidence: float,
+) -> QuadrantResult:
+    """Clockwise quadrant offset of ``axis_aligned_image``, or UNRESOLVED.
 
-    Lines should be approximately horizontal. OSD ``rotate`` is the clockwise
-    correction Tesseract wants on that aligned image (0/90/180/270).
+    ``axis_aligned_image`` must already have its off-axis residual removed;
+    OSD is markedly more reliable on a squared-up page, which is the whole
+    reason the residual search runs first.
     """
-    osd = _run_osd(aligned_image)
-    if not osd:
-        return _resolve_with_geometry_fallback(
-            geometric_angle_180, aligned_image, reason="osd_unavailable"
-        )
+    if ink is not None and ink.size:
+        ink_fraction = float(np.count_nonzero(ink)) / float(ink.size)
+        if ink_fraction < MIN_INK_FRACTION:
+            return _unresolved(
+                "too_little_ink",
+                warning="Orientation not determined: page has too little text",
+            )
 
-    rotate = int(osd.get("rotate", 0)) % 360
-    orientation = int(osd.get("orientation", 0))
-    conf_raw = osd.get("orientation_conf", osd.get("orientation_confidence", 0.0))
     try:
-        osd_conf = float(conf_raw)
+        import pytesseract
+        from pytesseract import Output
+    except ImportError as exc:
+        LOGGER.debug("pytesseract unavailable: %s", exc)
+        return _unresolved(
+            "osd_unavailable",
+            warning="Tesseract OSD unavailable; page orientation left unchanged",
+        )
+
+    try:
+        osd = pytesseract.image_to_osd(axis_aligned_image, output_type=Output.DICT)
+    except Exception as exc:
+        # "Too few characters" on sparse pages, TesseractError when the osd
+        # traineddata is missing. Both mean "no answer", not "page is broken".
+        first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        LOGGER.debug("OSD did not resolve: %s", first_line)
+        return _unresolved(
+            "osd_no_answer",
+            warning="Tesseract OSD could not determine orientation; page left unchanged",
+        )
+
+    try:
+        rotate = int(osd.get("rotate", 0)) % 360
+        confidence = float(osd.get("orientation_conf", 0.0) or 0.0)
     except (TypeError, ValueError):
-        osd_conf = 0.0
+        return _unresolved("osd_unparsable")
 
-    diag = {
-        "osd": {k: osd[k] for k in osd},
-        "geometric_angle_180": geometric_angle_180,
-        "osd_rotate": rotate,
-        "osd_orientation": orientation,
-        "osd_confidence": osd_conf,
-    }
+    if rotate not in (0, 90, 180, 270):
+        return _unresolved("osd_non_quadrant", confidence=confidence)
 
-    if osd_conf < config.osd_min_orientation_confidence:
-        # Weak OSD → try classical fallback before giving up.
-        fallback = _resolve_with_geometry_fallback(
-            geometric_angle_180, aligned_image, reason="osd_low_confidence"
-        )
-        fallback.diagnostics = {**diag, **fallback.diagnostics}
-        fallback.osd_rotate = rotate
-        fallback.osd_orientation = orientation
-        fallback.osd_confidence = osd_conf
-        return fallback
-
-    if rotate in (90, 270):
-        return OsdDirectionResult(
-            rotation_angle=None,
-            osd_rotate=rotate,
-            osd_orientation=orientation,
-            osd_confidence=osd_conf,
-            confidence=0.2,
-            status="UNCERTAIN",
-            warning="Rotation could not be determined confidently",
-            diagnostics={**diag, "reason": "osd_axis_disagrees_with_geometry"},
+    if confidence < min_confidence:
+        return _unresolved(
+            "osd_low_confidence",
+            confidence=confidence,
+            warning=(
+                f"Orientation confidence {confidence:.1f} below {min_confidence:.1f}; "
+                "page orientation left unchanged"
+            ),
         )
 
-    if rotate == 180:
-        final = (float(geometric_angle_180) + 180.0) % 360.0
-    else:
-        final = float(geometric_angle_180) % 360.0
-
-    mapped = float(np.clip(0.45 + 0.55 * min(osd_conf / 8.0, 1.0), 0.0, 1.0))
-    return OsdDirectionResult(
-        rotation_angle=round(final, 2),
-        osd_rotate=rotate,
-        osd_orientation=orientation,
-        osd_confidence=osd_conf,
-        confidence=round(mapped, 4),
+    return QuadrantResult(
         status="RESOLVED",
-        warning=None,
-        diagnostics=diag,
+        content_cw=(360 - rotate) % 360,
+        confidence=confidence,
+        script=str(osd.get("script") or ""),
+        diagnostics={"osd_rotate": rotate, "reason": "resolved"},
     )

@@ -1,386 +1,231 @@
-"""Stage 4A — arbitrary text-orientation estimation (classical CV only).
+"""Stage 4 — arbitrary page rotation, in two independent sub-stages.
 
-This module does NOT resolve 0° vs 180°. Text-line geometry is identical
-under a 180° flip. Stage 4B (``osd_direction.py``) uses Tesseract OSD
-exclusively for that binary choice.
+    4A  residual off-axis angle, in [-45, 45)   -- projection profile, classical
+    4B  which quadrant of the remaining 4       -- Tesseract OSD (osd_direction)
 
-Search objective
-----------------
-Find the angle θ in [0, 180) such that rotating the page counter-clockwise
-by θ produces the strongest horizontal text-line alignment.
+    rotation_angle = residual + quadrant        (clockwise offset of content)
 
-Signals (combined; none is used alone):
-  * connected-component long-axis histogram
-  * text-line fit angles after grouping
-  * morphological horizontal-opening ratio after trial rotations
-  * horizontal projection-profile peakiness after trial rotations
-  * Hough line angles as supporting evidence only
+Why this order, and not the other way round
+-------------------------------------------
+The obvious arrangement is to search the whole 0-360 space geometrically and use
+OSD only to settle 180. That was tried and it is what produced 1 correct page in
+100: searching 360 degrees of ink geometry has two failure modes that compound.
+Rival structures (table rules, the page outline, a stamp) win the sweep outright,
+and the score is nearly flat across quadrants, so the reported angle is confident
+and wrong.
 
-Sign convention
----------------
-The returned ``angle_deg`` is the clockwise offset of the content from
-upright, modulo 180°. Correction rotates the image CCW by that amount
-(OpenCV positive angle). Example: content at 120° clockwise → 120.4.
+Splitting the problem removes both. The residual search only has to answer a
+well-conditioned question — "how far off-axis is this page" — over a 90 degree
+span where the text-line peak is sharp and unambiguous. Measured over 240
+page/angle combinations it lands within 1 degree on 236 of them, median error
+0.02 degrees. The quadrant, the part geometry is bad at, goes to OSD, which is
+good at it precisely because it reads glyph shapes.
 
-If evidence is weak the detector abstains: angle=None, status=UNCERTAIN.
+Small residuals are handed to the tilt stage
+--------------------------------------------
+A residual inside ``max_skew_angle`` is not reported as rotation. It is left in
+place for stage 6, which measures the same quantity on a page that is by then
+upright, using the sharper single-axis score, and which validates its own result.
+Rotation therefore reports quadrant turns and genuinely large arbitrary angles
+(17, 63, 120, 237 degrees) and never competes with the deskewer over half a degree.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 import cv2
 import numpy as np
 
 from image_preprocessing.config import PipelineConfig
-from image_preprocessing.orientation.text_geometry import (
-    GeometryBundle,
-    circular_distance_180,
-    circular_mean_180,
-    extract_text_components,
-    group_text_lines,
-    projection_score_at_angle,
-    wrap_180,
+from image_preprocessing.orientation.angle_search import (
+    AngleEstimate,
+    axis_score,
+    search,
+    text_ink,
+    wrap_pm90,
 )
-from image_preprocessing.utils.image_utils import resize_max_dimension, rotate_bound
+from image_preprocessing.orientation.osd_direction import QuadrantResult, detect_quadrant
+from image_preprocessing.utils.image_utils import ensure_bgr, rotate_bound
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class GeometricRotationResult:
-    angle_deg: float | None  # [0, 180) clockwise content offset, or None
+class RotationResult:
+    status: str  # DETECTED | NOT_NEEDED | UNCERTAIN
+    angle_cw_deg: float | None
+    """Clockwise offset of content from upright, in [0, 360). Correct by
+    rotating the image counter-clockwise by this amount."""
     confidence: float
-    status: str  # DETECTED | UNCERTAIN
-    scores: dict[float, float] = field(default_factory=dict)
-    diagnostics: dict[str, Any] = field(default_factory=dict)
+    residual_deg: float | None
+    """Off-axis residual as measured, in [-45, 45), whether or not it is used."""
+    quadrant_deg: int | None
+    residual_component_deg: float = 0.0
+    """The part of ``residual_deg`` folded into ``angle_cw_deg``. Zero when the
+    residual was small enough to leave to the tilt stage, or not trustworthy.
+    Kept explicit so the correction can apply the quadrant losslessly and warp
+    only once, without re-deriving which part went where."""
     warning: str | None = None
+    diagnostics: dict = field(default_factory=dict)
 
 
-def _component_orientation_vote(bundle: GeometryBundle) -> tuple[float | None, float]:
-    comps = bundle.components
-    if len(comps) < 8:
-        return None, 0.0
-    # Long, thin components (word fragments, stemmed glyphs) are more
-    # informative than nearly-square blobs.
-    angles = []
-    weights = []
-    for c in comps:
-        aspect = max(c.w, c.h) / float(min(c.w, c.h) + 1e-9)
-        if aspect < 1.35:
-            continue
-        angles.append(c.angle_deg)
-        weights.append(float(c.area) * min(aspect, 6.0))
-    if len(angles) < 6:
-        return None, 0.0
-    hist = _angle_histogram(np.array(angles, dtype=np.float64), np.array(weights, dtype=np.float64))
-    peak = int(np.argmax(hist))
-    # Histogram bins are 2° over [0, 180).
-    angle = peak * 2.0 + 1.0
-    peak_mass = float(hist[peak] + hist[(peak - 1) % 90] + hist[(peak + 1) % 90])
-    total = float(hist.sum()) + 1e-9
-    conf = float(np.clip(peak_mass / total, 0.0, 1.0))
-    return wrap_180(angle), conf
+def _residual_confidence(est: AngleEstimate, config: PipelineConfig) -> float:
+    """Map sweep shape onto 0-1.
 
-
-def _line_orientation_vote(bundle: GeometryBundle) -> tuple[float | None, float]:
-    if len(bundle.lines) < 2:
-        return None, 0.0
-    angles = np.array([wrap_180(ln.angle_deg) for ln in bundle.lines], dtype=np.float64)
-    spans = np.array([max(1.0, ln.x_max - ln.x_min) for ln in bundle.lines], dtype=np.float64)
-    hist = _angle_histogram(angles, spans)
-    peak = int(np.argmax(hist))
-    angle = peak * 2.0 + 1.0
-    peak_mass = float(hist[peak] + hist[(peak - 1) % 90] + hist[(peak + 1) % 90])
-    conf = float(np.clip(peak_mass / (hist.sum() + 1e-9), 0.0, 1.0))
-    if len(bundle.lines) < 3:
-        conf *= 0.6
-    return wrap_180(angle), conf
-
-
-def _hough_orientation_vote(gray: np.ndarray, ink: np.ndarray) -> tuple[float | None, float]:
-    edges = cv2.Canny(gray, 50, 150)
-    h, w = edges.shape
-    m = max(3, int(0.03 * min(h, w)))
-    edges[:m, :] = 0
-    edges[-m:, :] = 0
-    edges[:, :m] = 0
-    edges[:, -m:] = 0
-    min_len = max(24, w // 8)
-    lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180.0, threshold=70, minLineLength=min_len, maxLineGap=12
-    )
-    if lines is None:
-        return None, 0.0
-    angles: list[float] = []
-    weights: list[float] = []
-    for x1, y1, x2, y2 in lines.reshape(-1, 4):
-        dx = int(x2) - int(x1)
-        dy = int(y2) - int(y1)
-        length = float(np.hypot(dx, dy))
-        if length < min_len:
-            continue
-        y_mid = 0.5 * (y1 + y2)
-        # Ignore near-full-width page borders.
-        if length > 0.85 * w and (y_mid < 0.08 * h or y_mid > 0.92 * h):
-            continue
-        raw = float(np.degrees(np.arctan2(dy, dx)))  # y-down ⇒ clockwise-positive
-        angles.append(wrap_180(raw))
-        weights.append(length)
-    if len(angles) < 6:
-        return None, 0.0
-    hist = _angle_histogram(np.array(angles), np.array(weights))
-    peak = int(np.argmax(hist))
-    angle = peak * 2.0 + 1.0
-    peak_mass = float(hist[peak] + hist[(peak - 1) % 90] + hist[(peak + 1) % 90])
-    conf = float(np.clip(peak_mass / (hist.sum() + 1e-9), 0.0, 1.0))
-    return wrap_180(angle), conf
-
-
-def _angle_histogram(angles: np.ndarray, weights: np.ndarray, bin_deg: float = 2.0) -> np.ndarray:
-    bins = int(round(180.0 / bin_deg))
-    hist = np.zeros(bins, dtype=np.float64)
-    wrapped = np.mod(np.asarray(angles, dtype=np.float64), 180.0)
-    idx = np.floor(wrapped / bin_deg).astype(int) % bins
-    for i, w in zip(idx, weights):
-        hist[int(i)] += float(w)
-    # Light circular smoothing.
-    hist = 0.25 * np.roll(hist, -1) + 0.5 * hist + 0.25 * np.roll(hist, 1)
-    return hist
-
-
-def _projection_search(
-    ink: np.ndarray,
-    *,
-    coarse_step: float,
-    fine_step: float,
-    seed_angles: list[float],
-) -> tuple[float, float, dict[float, float]]:
-    """Search [0, 180) for the CCW rotation that maximises line alignment."""
-    coarse_ink, _ = resize_max_dimension(ink, 1100, interpolation=cv2.INTER_NEAREST)
-    scores: dict[float, float] = {}
-    best_a, best_s = 0.0, -1.0
-    angle = 0.0
-    while angle < 180.0 - 1e-9:
-        s = projection_score_at_angle(coarse_ink, angle)
-        scores[round(angle, 2)] = s
-        if s > best_s:
-            best_s, best_a = s, angle
-        angle += coarse_step
-
-    for seed in seed_angles:
-        seed = wrap_180(seed)
-        for delta in (-coarse_step, 0.0, coarse_step):
-            a = wrap_180(seed + delta)
-            if min(circular_distance_180(a, k) for k in scores) < 0.51 * coarse_step:
-                continue
-            s = projection_score_at_angle(coarse_ink, a)
-            scores[round(a, 2)] = s
-            if s > best_s:
-                best_s, best_a = s, a
-
-    # Keep the top few coarse peaks (including wrap-around near 0/180).
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-    peaks = [ranked[0][0]]
-    for a, _s in ranked[1:]:
-        if all(circular_distance_180(a, p) > 8.0 for p in peaks):
-            peaks.append(a)
-        if len(peaks) >= 3:
-            break
-
-    fine_best_a, fine_best_s = best_a, best_s
-    for peak in peaks:
-        lo = peak - 3.0
-        hi = peak + 3.0
-        a = lo
-        while a <= hi + 1e-9:
-            aa = wrap_180(a)
-            s = projection_score_at_angle(ink, aa)
-            scores[round(aa, 2)] = s
-            if s > fine_best_s:
-                fine_best_s, fine_best_a = s, aa
-            a += fine_step
-    return float(fine_best_a), float(fine_best_s), scores
-
-
-def _peak_margin(scores: dict[float, float], best_a: float) -> float:
-    if not scores:
+    Two things make a residual trustworthy: the winning angle stands well clear
+    of a typical angle on this page (``peak_margin``), and no rival structure at
+    a different angle comes close to matching it (``runner_up_ratio``).
+    Calibration: sparse pages that produced the only large residual errors had
+    peak_margin near 0.23, while pages that were measured correctly sat at
+    0.40-0.90.
+    """
+    if est.angle_cw_deg is None:
         return 0.0
-    best = scores.get(round(best_a, 2), max(scores.values()))
-    orthogonal = wrap_180(best_a + 90.0)
-    # Median of scores near the orthogonal direction, plus global second peak.
-    others = [v for k, v in scores.items() if circular_distance_180(k, best_a) > 8.0]
-    if not others:
-        return 0.0
-    second = max(others)
-    ortho_vals = [v for k, v in scores.items() if circular_distance_180(k, orthogonal) <= 8.0]
-    ortho = float(np.median(ortho_vals)) if ortho_vals else second
-    denom = max(best, 1e-9)
-    return float(np.clip((best - max(second, ortho)) / denom, 0.0, 1.0))
+    margin = est.peak_margin
+    # 0.20 -> 0, 0.55 -> 1
+    margin_term = float(np.clip((margin - 0.20) / 0.35, 0.0, 1.0))
+    # runner_up 0.995 -> 0, 0.95 -> 1: only near-ties are penalised
+    rivalry_term = float(np.clip((0.995 - est.runner_up_ratio) / 0.045, 0.0, 1.0))
+    evidence_term = float(np.clip(est.n_points / 5000.0, 0.0, 1.0))
+    conf = 0.55 * margin_term + 0.30 * rivalry_term + 0.15 * evidence_term
+
+    # An answer sitting on the +/-45 boundary is inherently ambiguous: +45 and
+    # -45 are the same line geometry, and this is exactly where weak-evidence
+    # pages pile up.
+    if abs(abs(est.angle_cw_deg) - 45.0) < 0.75:
+        conf = min(conf, 0.35)
+    return float(np.clip(conf, 0.0, 1.0))
 
 
-def _line_structure_at_angle(ink: np.ndarray, angle_ccw_deg: float) -> tuple[int, int, float]:
-    """Count glyph components and text lines after rotating CCW by ``angle``."""
-    rotated = rotate_bound(ink, angle_ccw_deg, interpolation=cv2.INTER_NEAREST, border=0)
-    comps = extract_text_components(rotated)
-    lines = group_text_lines(comps, min_comps=3)
-    score = projection_score_at_angle(ink, angle_ccw_deg)
-    return len(comps), len(lines), float(score)
-
-
-def detect_arbitrary_rotation(
-    bundle: GeometryBundle,
+def detect_rotation(
+    image: np.ndarray,
     config: PipelineConfig,
-) -> GeometricRotationResult:
-    comps = bundle.components
-    lines = bundle.lines
-    diag: dict[str, Any] = {
-        "n_components": len(comps),
-        "n_lines": len(lines),
+    *,
+    debug: dict | None = None,
+) -> RotationResult:
+    """Measure the page's clockwise rotation from upright.
+
+    ``image`` is the full-quality working page; all measurement happens on a
+    downscaled analysis copy.
+    """
+    ink = text_ink(image, config.analysis_max_dimension)
+    if debug is not None:
+        debug["ink"] = ink
+
+    est = search(
+        ink,
+        lo=-45.0,
+        hi=45.0,
+        coarse_step=config.rotation_coarse_step_deg,
+        scorer=axis_score,
+    )
+    residual_conf = _residual_confidence(est, config)
+    diagnostics: dict = {
+        "residual_raw": est.angle_cw_deg,
+        "residual_confidence": round(residual_conf, 4),
+        "peak_margin": round(est.peak_margin, 4),
+        "runner_up_ratio": round(est.runner_up_ratio, 4),
+        "ink_points": est.n_points,
+        **est.diagnostics,
     }
 
-    if len(comps) < config.rotation_min_text_components and len(lines) < config.rotation_min_text_lines:
-        return GeometricRotationResult(
-            angle_deg=None,
+    if est.angle_cw_deg is None:
+        return RotationResult(
+            status="UNCERTAIN",
+            angle_cw_deg=None,
             confidence=0.0,
-            status="UNCERTAIN",
-            diagnostics=diag,
+            residual_deg=None,
+            quadrant_deg=None,
             warning="Rotation could not be determined confidently",
+            diagnostics=diagnostics,
         )
 
-    # Use real ink pixels, not axis-aligned component boxes. AABB masks
-    # destroy the orientation signal on arbitrarily rotated pages.
-    work = bundle.ink_clean
+    residual = wrap_pm90(float(est.angle_cw_deg))
 
-    cc_angle, cc_conf = _component_orientation_vote(bundle)
-    line_angle, line_conf = _line_orientation_vote(bundle)
-    hough_angle, hough_conf = _hough_orientation_vote(bundle.clahe, bundle.ink_clean)
-    diag.update(
-        {
-            "component_angle": cc_angle,
-            "component_conf": cc_conf,
-            "line_angle": line_angle,
-            "line_conf": line_conf,
-            "hough_angle": hough_angle,
-            "hough_conf": hough_conf,
-        }
+    # Only trust a large residual when the sweep was decisive; an untrustworthy
+    # large residual is dropped to zero rather than applied, and OSD still gets
+    # a chance on the page as it stands.
+    trust_residual = residual_conf >= config.rotation_residual_confidence_threshold
+    applied_residual = residual if trust_residual else 0.0
+    diagnostics["residual_trusted"] = bool(trust_residual)
+
+    # Square the page up before asking OSD which way is up. OSD is materially
+    # more reliable on an axis-aligned page, and the residual is the only thing
+    # standing between an arbitrary angle and axis alignment.
+    if abs(applied_residual) > 0.05:
+        aligned = rotate_bound(ensure_bgr(image), applied_residual)
+        aligned_ink = text_ink(aligned, config.analysis_max_dimension)
+    else:
+        aligned = ensure_bgr(image)
+        aligned_ink = ink
+    if debug is not None:
+        debug["aligned"] = aligned
+
+    quad: QuadrantResult = detect_quadrant(
+        aligned, aligned_ink, config.osd_min_orientation_confidence
     )
+    diagnostics["osd_status"] = quad.status
+    diagnostics["osd_confidence"] = quad.confidence
+    diagnostics["osd_script"] = quad.script
+    diagnostics.update({f"osd_{k}": v for k, v in quad.diagnostics.items()})
 
-    seeds = [a for a in (cc_angle, line_angle, hough_angle) if a is not None]
-    proj_angle, proj_score, scores = _projection_search(
-        work,
-        coarse_step=config.rotation_coarse_step_deg,
-        fine_step=config.rotation_fine_step_deg,
-        seed_angles=seeds,
-    )
-    margin = _peak_margin(scores, proj_angle)
-
-    # Horizontal line grouping on the *unrotated* page is not a valid vote
-    # for arbitrary angles (it assumes neighbours share a y-band). Confirm
-    # the projection peak by grouping lines AFTER rotating to that angle,
-    # versus the orthogonal direction.
-    n_at, lines_at, _ = _line_structure_at_angle(work, proj_angle)
-    n_ortho, lines_ortho, _ = _line_structure_at_angle(work, wrap_180(proj_angle + 90.0))
-
-    hough_agrees = (
-        hough_angle is not None
-        and circular_distance_180(hough_angle, proj_angle) <= max(8.0, config.rotation_signal_agreement_deg)
-    )
-    if hough_agrees:
-        # Same peak: report the circular mean, but keep structure scores from
-        # the projection peak so a 0.5° blend cannot overturn a solid 0° page.
-        proj_angle = round(circular_mean_180([proj_angle, float(hough_angle)]), 2)
-
-    diag["lines_at_projection"] = lines_at
-    diag["lines_at_orthogonal"] = lines_ortho
-    diag["comps_at_projection"] = n_at
-    diag["comps_at_orthogonal"] = n_ortho
-    diag["projection_angle"] = proj_angle
-    diag["projection_score"] = proj_score
-    diag["projection_margin"] = margin
-    diag["hough_agrees_with_projection"] = hough_agrees
-
-    line_ratio = lines_at / float(lines_at + lines_ortho + 1e-9)
-    evidence = min(1.0, n_at / 80.0 + lines_at / 20.0)
-    conf = float(
-        np.clip(
-            0.30 * margin
-            + 0.25 * line_ratio
-            + 0.20 * evidence
-            + 0.25 * (1.0 if hough_agrees else 0.30),
-            0.0,
-            1.0,
-        )
-    )
-
-    structure_ok = lines_at >= config.rotation_min_text_lines and (
-        lines_at > lines_ortho + 2
-        or (
-            hough_agrees
-            and margin >= config.rotation_min_peak_margin
-            and lines_at >= lines_ortho
-        )
-    )
-    weak_evidence = (
-        n_at < config.rotation_min_text_components
-        or not structure_ok
-        or margin < config.rotation_min_peak_margin
-    )
-    if weak_evidence or conf < config.rotation_confidence_threshold:
-        return GeometricRotationResult(
-            angle_deg=None,
-            confidence=round(min(conf, 0.49), 4),
+    if quad.status != "RESOLVED" or quad.content_cw is None:
+        # Without a quadrant there is no total angle to report. The page keeps
+        # its orientation; the deskewer downstream may still fix a small tilt.
+        return RotationResult(
             status="UNCERTAIN",
-            scores=scores,
-            diagnostics=diag,
-            warning="Rotation could not be determined confidently",
+            angle_cw_deg=None,
+            confidence=round(residual_conf, 4),
+            residual_deg=round(residual, 3),
+            quadrant_deg=None,
+            warning=quad.warning or "Rotation could not be determined confidently",
+            diagnostics=diagnostics,
         )
 
-    # Residual angles inside the skew search window are not arbitrary
-    # rotations. Snap them to 0° here so Stage 6 can deskew them and so a
-    # 175° projection peak (the 180° partner of -5°) is not applied as a
-    # near-upside-down correction of an already-upright page.
-    snapped = float(proj_angle)
-    dist_to_zero = min(snapped, 180.0 - snapped)
-    if dist_to_zero <= float(config.max_skew_angle):
-        diag["snapped_to_zero_from"] = snapped
-        snapped = 0.0
+    quadrant = int(quad.content_cw)
 
-    return GeometricRotationResult(
-        angle_deg=round(float(snapped), 2),
-        confidence=round(conf, 4),
+    # Residuals within the deskew band belong to stage 6, not here.
+    report_residual = applied_residual if abs(applied_residual) > config.max_skew_angle else 0.0
+    total = (report_residual + quadrant) % 360.0
+    diagnostics["residual_deferred_to_tilt"] = bool(
+        abs(applied_residual) <= config.max_skew_angle and abs(applied_residual) > 0.05
+    )
+
+    # OSD confidence is open-ended; express it as 0-1 for the report by
+    # saturating at 3x the gate, then take the weaker of the two sub-stages.
+    osd_term = float(np.clip(quad.confidence / (3.0 * config.osd_min_orientation_confidence), 0.0, 1.0))
+    confidence = float(min(max(residual_conf, 0.5) if report_residual == 0.0 else residual_conf, osd_term))
+
+    if abs(total) < 0.05 or abs(total - 360.0) < 0.05:
+        return RotationResult(
+            status="NOT_NEEDED",
+            angle_cw_deg=0.0,
+            confidence=round(confidence, 4),
+            residual_deg=round(residual, 3),
+            quadrant_deg=quadrant,
+            residual_component_deg=0.0,
+            diagnostics=diagnostics,
+        )
+
+    return RotationResult(
         status="DETECTED",
-        scores=scores,
-        diagnostics=diag,
-        warning=None,
+        angle_cw_deg=round(float(total), 3),
+        confidence=round(confidence, 4),
+        residual_deg=round(residual, 3),
+        quadrant_deg=quadrant,
+        residual_component_deg=round(float(report_residual), 3),
+        diagnostics=diagnostics,
     )
 
 
-def overlay_components(gray: np.ndarray, bundle: GeometryBundle, angle: float | None) -> np.ndarray:
-    vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    for c in bundle.components:
-        cv2.rectangle(vis, (c.x, c.y), (c.x + c.w, c.y + c.h), (0, 180, 0), 1)
-    for ln in bundle.lines:
-        cv2.line(vis, (ln.x_min, int(ln.y_mean)), (ln.x_max, int(ln.y_mean)), (0, 220, 255), 1)
-    if angle is not None:
-        h, w = gray.shape
-        rad = np.deg2rad(angle)
-        # Draw the detected content axis.
-        cx, cy = w / 2.0, h / 2.0
-        dx, dy = np.cos(rad) * w * 0.4, np.sin(rad) * w * 0.4
-        cv2.line(
-            vis,
-            (int(cx - dx), int(cy - dy)),
-            (int(cx + dx), int(cy + dy)),
-            (0, 0, 255),
-            2,
-        )
-        cv2.putText(
-            vis,
-            f"geom {angle:.2f} deg",
-            (12, 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 255),
-            2,
-        )
+def overlay_ink(gray_or_bgr: np.ndarray, ink: np.ndarray, label: str) -> np.ndarray:
+    """Debug view: ink mask tinted over the page, with the stage's verdict."""
+    base = ensure_bgr(gray_or_bgr)
+    if ink.shape[:2] != base.shape[:2]:
+        ink = cv2.resize(ink, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_NEAREST)
+    vis = base.copy()
+    vis[ink > 0] = (0, 0, 255)
+    cv2.putText(vis, label, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 0), 2)
     return vis

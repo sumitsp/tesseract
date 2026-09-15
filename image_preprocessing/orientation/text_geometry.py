@@ -12,12 +12,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from image_preprocessing.utils.image_utils import (
-    INTER_DOWNSAMPLE,
-    rotate_bound,
-    to_gray,
-)
-
+from image_preprocessing.orientation.angle_search import binarize, normalize_illumination
 
 @dataclass
 class TextComponent:
@@ -38,68 +33,6 @@ class TextLine:
     x_min: int
     x_max: int
     angle_deg: float  # local line slant; positive = clockwise (y-down)
-
-
-@dataclass
-class GeometryBundle:
-    gray: np.ndarray
-    clahe: np.ndarray
-    ink: np.ndarray
-    ink_clean: np.ndarray
-    scale: float
-    analysis_size: tuple[int, int]
-    components: list[TextComponent]
-    lines: list[TextLine]
-
-
-def resize_for_analysis(gray: np.ndarray, max_dim: int) -> tuple[np.ndarray, float]:
-    h, w = gray.shape[:2]
-    longest = max(h, w)
-    if longest <= max_dim:
-        return gray, 1.0
-    scale = max_dim / float(longest)
-    out = cv2.resize(
-        gray,
-        (max(1, int(w * scale)), max(1, int(h * scale))),
-        interpolation=INTER_DOWNSAMPLE,
-    )
-    return out, scale
-
-
-def normalize_illumination(gray: np.ndarray) -> np.ndarray:
-    h, w = gray.shape
-    k = max(31, (min(h, w) // 20) | 1)
-    bg = cv2.GaussianBlur(gray, (k, k), 0)
-    bg = np.maximum(bg, 1)
-    norm = (gray.astype(np.float32) / bg.astype(np.float32)) * 128.0
-    return np.clip(norm, 0, 255).astype(np.uint8)
-
-
-def apply_clahe(gray: np.ndarray) -> np.ndarray:
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    return clahe.apply(gray)
-
-
-def _ink_from_adaptive(gray: np.ndarray) -> np.ndarray:
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    return cv2.adaptiveThreshold(
-        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 12
-    )
-
-
-def _ink_from_otsu(gray: np.ndarray) -> np.ndarray:
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thr = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    inv = 255 - thr
-    if cv2.countNonZero(inv) < cv2.countNonZero(thr):
-        return inv
-    return thr if cv2.countNonZero(thr) < cv2.countNonZero(inv) else inv
-
-
-def combine_ink_masks(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    combined = cv2.bitwise_or(a, b)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    return cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel, iterations=1)
 
 
 def remove_page_borders(ink: np.ndarray, margin_frac: float = 0.02) -> np.ndarray:
@@ -123,38 +56,36 @@ def remove_tiny_noise(ink: np.ndarray, min_area: int = 12) -> np.ndarray:
     return out
 
 
-def remove_ruling_lines(ink: np.ndarray, min_line_len_frac: float = 0.12) -> np.ndarray:
-    """Strip long table/form rules so detectors see glyphs, not borders."""
-    h, w = ink.shape
-    h_len = max(15, int(w * min_line_len_frac))
-    v_len = max(15, int(h * min_line_len_frac))
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len))
-    h_lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, h_kernel)
-    v_lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, v_kernel)
-    grow = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    lines = cv2.dilate(cv2.bitwise_or(h_lines, v_lines), grow, iterations=1)
-    return cv2.bitwise_and(ink, cv2.bitwise_not(lines))
-
-
 def extract_ink(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(normalized gray, raw ink, cleaned ink).
+
+    Binarization lives in ``angle_search`` so every stage shares one ink
+    definition; see its ``binarize`` docstring for why CLAHE is absent.
+    """
     norm = normalize_illumination(gray)
-    clahe = apply_clahe(norm)
-    ink = combine_ink_masks(_ink_from_adaptive(clahe), _ink_from_otsu(clahe))
-    ink_clean = remove_tiny_noise(remove_ruling_lines(remove_page_borders(ink)), min_area=10)
-    return clahe, ink, ink_clean
+    ink = binarize(gray)
+    ink_clean = remove_tiny_noise(remove_page_borders(ink), min_area=8)
+    return norm, ink, ink_clean
 
 
 def extract_text_components(
     ink: np.ndarray,
     *,
-    min_area: int = 20,
-    max_area_frac: float = 0.08,
-    min_h: int = 6,
+    min_area: int = 8,
+    max_area_frac: float = 0.02,
+    min_h: int = 3,
     max_h_frac: float = 0.12,
-    min_aspect: float = 0.12,
-    max_aspect: float = 12.0,
+    min_aspect: float = 0.08,
+    max_aspect: float = 15.0,
 ) -> list[TextComponent]:
+    """Glyph-scale connected components.
+
+    Thresholds are deliberately permissive. Analysis copies run around 1400 px
+    on the long edge, where body text is only 7-10 px tall and a glyph covers
+    ~25 px; the stricter limits this replaced kept 49 components on a lab report
+    holding roughly 30 text lines, which left line grouping with nothing to work
+    with.
+    """
     h_img, w_img = ink.shape
     max_area = int(h_img * w_img * max_area_frac)
     max_h = int(h_img * max_h_frac)
@@ -267,88 +198,3 @@ def group_text_lines(
             )
         )
     return lines
-
-
-def build_geometry(image: np.ndarray, max_dim: int) -> GeometryBundle:
-    gray_full = to_gray(image)
-    gray, scale = resize_for_analysis(gray_full, max_dim)
-    clahe, ink, ink_clean = extract_ink(gray)
-    comps = extract_text_components(ink_clean)
-    lines = group_text_lines(comps)
-    h, w = gray.shape
-    return GeometryBundle(
-        gray=gray,
-        clahe=clahe,
-        ink=ink,
-        ink_clean=ink_clean,
-        scale=scale,
-        analysis_size=(w, h),
-        components=comps,
-        lines=lines,
-    )
-
-
-def component_mask(shape: tuple[int, int], comps: list[TextComponent], ink: np.ndarray | None = None) -> np.ndarray:
-    mask = np.zeros(shape, dtype=np.uint8)
-    for c in comps:
-        if ink is not None:
-            mask[c.y : c.y + c.h, c.x : c.x + c.w] = ink[c.y : c.y + c.h, c.x : c.x + c.w]
-        else:
-            mask[c.y : c.y + c.h, c.x : c.x + c.w] = 255
-    return mask
-
-
-def horizontal_alignment_score(ink: np.ndarray) -> float:
-    """Higher when ink concentrates into distinct horizontal bands (text lines)."""
-    row = ink.sum(axis=1).astype(np.float64)
-    col = ink.sum(axis=0).astype(np.float64)
-    if row.sum() < 1:
-        return 0.0
-    row_n = row / (row.sum() + 1e-9)
-    col_n = col / (col.sum() + 1e-9)
-    row_var = float(np.var(row_n))
-    col_var = float(np.var(col_n))
-    k = max(5, len(row) // 40)
-    peaks = float(np.sort(row)[-k:].sum() / (row.sum() + 1e-9))
-    structure = row_var / (col_var + 1e-12)
-    return float(structure * (0.5 + 0.5 * peaks))
-
-
-def morphological_line_score(ink: np.ndarray) -> float:
-    h = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
-    v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
-    horiz = cv2.morphologyEx(ink, cv2.MORPH_OPEN, h)
-    vert = cv2.morphologyEx(ink, cv2.MORPH_OPEN, v)
-    hs = float(cv2.countNonZero(horiz))
-    vs = float(cv2.countNonZero(vert))
-    return hs / (vs + 1.0)
-
-
-def projection_score_at_angle(ink: np.ndarray, angle_ccw_deg: float) -> float:
-    """Score of text-line alignment after a CCW rotation of ``angle_ccw_deg``."""
-    rotated = rotate_bound(ink, angle_ccw_deg, interpolation=cv2.INTER_NEAREST, border=0)
-    proj = horizontal_alignment_score(rotated)
-    morph = morphological_line_score(rotated)
-    return float(proj + 0.25 * morph)
-
-
-def circular_mean_180(angles: list[float]) -> float:
-    if not angles:
-        return 0.0
-    doubled = np.deg2rad(2.0 * np.array(angles, dtype=np.float64))
-    c = float(np.mean(np.cos(doubled)))
-    s = float(np.mean(np.sin(doubled)))
-    return wrap_180(float(np.rad2deg(np.arctan2(s, c) / 2.0)))
-
-
-def circular_distance_180(a: float, b: float) -> float:
-    d = abs((a - b) % 180.0)
-    return min(d, 180.0 - d)
-
-
-def wrap_180(angle: float) -> float:
-    return float(angle % 180.0)
-
-
-def wrap_360(angle: float) -> float:
-    return float(angle % 360.0)

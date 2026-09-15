@@ -1,7 +1,25 @@
-"""Accept a candidate correction only when it improves geometric metrics.
+"""Stage 7 — accept a candidate correction only if it is measurably not worse.
 
-Every transform is: candidate → validate → accept or reject.
-A wrong correction is worse than leaving the page unchanged.
+Every geometric change in the pipeline goes through here:
+
+    candidate -> validate -> better or equal? -> accept, else keep previous
+
+A detector returning an angle is not evidence that applying it helped. This
+module re-measures the page after the transform and compares.
+
+The metric is the same horizontal text-line concentration the detectors
+maximise (``angle_search.line_score`` at 0 degrees, i.e. "are text lines
+horizontal *now*"), so a rotation that genuinely squares the page up scores
+higher and one that tilts it away scores lower. Sharing the metric with the
+detectors is deliberate: a validator measuring something unrelated cannot tell
+whether the thing the detector tried to improve actually improved.
+
+Tolerance, not strict improvement
+---------------------------------
+A correct 180-degree turn leaves line geometry identical, and resampling costs a
+little sharpness, so demanding strict improvement would reject correct
+corrections. The gate is therefore "not meaningfully worse", with the small
+tolerance in ``validation_regression_tolerance``.
 """
 
 from __future__ import annotations
@@ -11,13 +29,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from image_preprocessing.config import PipelineConfig
-from image_preprocessing.orientation.text_geometry import (
-    extract_ink,
-    extract_text_components,
-    group_text_lines,
-    horizontal_alignment_score,
+from image_preprocessing.orientation.angle_search import (
+    ink_points,
+    line_score,
+    text_ink,
 )
-from image_preprocessing.utils.image_utils import resize_max_dimension, to_gray
 
 
 @dataclass
@@ -28,80 +44,59 @@ class ValidationResult:
     reason: str
 
 
-def alignment_score(image: np.ndarray, max_dim: int) -> float:
-    gray = to_gray(image)
-    analysis, _ = resize_max_dimension(gray, max_dim)
-    _clahe, _ink, ink = extract_ink(analysis)
-    comps = extract_text_components(ink)
-    if len(comps) >= 8:
-        mask = np.zeros_like(ink)
-        for c in comps:
-            mask[c.y : c.y + c.h, c.x : c.x + c.w] = ink[c.y : c.y + c.h, c.x : c.x + c.w]
-        work = mask
-    else:
-        work = ink
-    proj = horizontal_alignment_score(work)
-    lines = group_text_lines(comps, min_comps=3)
-    if len(lines) >= 2:
-        angles = np.array([abs(ln.angle_deg) for ln in lines], dtype=np.float64)
-        flat = float(np.mean(angles < 4.0))
-        n_factor = min(len(lines) / 15.0, 1.0)
-    else:
-        flat = 0.0
-        n_factor = 0.0
-    return float(proj + 0.8 * flat + 0.4 * n_factor)
+def alignment_score(image: np.ndarray, config: PipelineConfig) -> float:
+    """How horizontal the page's text lines are, as it currently stands."""
+    ink = text_ink(image, config.analysis_max_dimension)
+    xs, ys = ink_points(ink)
+    if len(xs) < 300:
+        return 0.0
+    return line_score(xs, ys, 0.0)
 
 
-def residual_skew_abs(image: np.ndarray, max_dim: int) -> float | None:
-    gray = to_gray(image)
-    analysis, _ = resize_max_dimension(gray, max_dim)
-    _clahe, _ink, ink = extract_ink(analysis)
-    lines = group_text_lines(extract_text_components(ink), min_comps=3)
-    if len(lines) < 3:
-        return None
-    angles = np.array([ln.angle_deg for ln in lines], dtype=np.float64)
-    angles = angles[np.abs(angles) <= 20]
-    if len(angles) < 3:
-        return None
-    return float(abs(np.median(angles)))
+def content_not_cropped(before_shape, after_shape, *, tolerance: float = 0.005) -> bool:
+    """A correction may grow the canvas (rotate-bound) but must never shrink it.
 
-
-def validate_candidate(
-    before_image: np.ndarray,
-    after_image: np.ndarray,
-    config: PipelineConfig,
-    *,
-    min_improvement_ratio: float | None = None,
-) -> ValidationResult:
-    """Reject the candidate if alignment got worse (or did not improve enough)."""
-    before = alignment_score(before_image, config.analysis_max_dimension)
-    after = alignment_score(after_image, config.analysis_max_dimension)
-    ratio = config.validation_min_improvement_ratio if min_improvement_ratio is None else min_improvement_ratio
-    # Allow tiny numeric jitter but never accept a clearly worse page.
-    if after + 1e-6 < before * (1.0 - ratio):
-        return ValidationResult(
-            accepted=False,
-            before_score=before,
-            after_score=after,
-            reason="alignment_worse_than_before",
-        )
-    return ValidationResult(
-        accepted=True,
-        before_score=before,
-        after_score=after,
-        reason="alignment_improved_or_equivalent",
-    )
-
-
-def content_not_cropped(before_shape: tuple[int, ...], after_shape: tuple[int, ...]) -> bool:
-    """Rotate-bound must not shrink the canvas below the original min side unreasonably.
-
-    We cannot compare pixel counts directly after rotation (canvas grows). This
-    check only flags accidental crops that produce a smaller image than the
-    source without a 90° axis swap explanation.
+    Compares against the rotated bounding box rather than raw area, since a
+    quarter turn legitimately swaps width and height.
     """
     bh, bw = before_shape[:2]
     ah, aw = after_shape[:2]
-    before_area = bh * bw
-    after_area = ah * aw
-    return after_area + 1 >= int(0.92 * before_area)
+    before_diag = float(bw * bw + bh * bh)
+    after_diag = float(aw * aw + ah * ah)
+    if after_diag + 1e-9 >= before_diag * (1.0 - tolerance):
+        return True
+    # Allow the exact quarter-turn swap.
+    return (abs(aw - bh) <= 2 and abs(ah - bw) <= 2)
+
+
+def validate_candidate(
+    before: np.ndarray,
+    after: np.ndarray,
+    config: PipelineConfig,
+    *,
+    regression_tolerance: float | None = None,
+) -> ValidationResult:
+    """Accept ``after`` unless it is measurably worse aligned than ``before``."""
+    tolerance = (
+        config.validation_regression_tolerance
+        if regression_tolerance is None
+        else regression_tolerance
+    )
+    if not content_not_cropped(before.shape, after.shape):
+        return ValidationResult(False, 0.0, 0.0, "content_cropped")
+
+    before_score = alignment_score(before, config)
+    after_score = alignment_score(after, config)
+    if before_score <= 0.0 and after_score <= 0.0:
+        # Nothing measurable either way: no grounds to reject, and no grounds to
+        # claim an improvement.
+        return ValidationResult(True, before_score, after_score, "no_measurable_ink")
+
+    if after_score + 1e-12 >= before_score * (1.0 - tolerance):
+        return ValidationResult(True, before_score, after_score, "not_worse")
+    return ValidationResult(
+        False,
+        before_score,
+        after_score,
+        f"alignment_regressed({after_score:.5f}<{before_score:.5f})",
+    )

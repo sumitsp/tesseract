@@ -34,31 +34,40 @@ ANALYSIS_COARSE_MAX_DIMENSION = 800
 QUALITY_REVIEW_THRESHOLD = 4.0
 
 # ---------------------------------------------------------------------------
-# Rotation (arbitrary-angle geometric detector + OSD 180° resolution)
+# Rotation — stage 4A residual sweep, stage 4B OSD quadrant
 # ---------------------------------------------------------------------------
-ROTATION_CONFIDENCE_THRESHOLD = 0.62
-ROTATION_COARSE_STEP_DEG = 2.0
-ROTATION_FINE_STEP_DEG = 0.25
-ROTATION_MIN_TEXT_COMPONENTS = 12
-ROTATION_MIN_TEXT_LINES = 3
-ROTATION_SIGNAL_AGREEMENT_DEG = 6.0
-ROTATION_MIN_PEAK_MARGIN = 0.08
+# Coarse sweep step for the residual search over [-45, 45). 0.5° keeps the
+# sweep at 180 evaluations (milliseconds, since it runs on coordinates rather
+# than warped images) and is fine enough that the refinement lands on the true
+# peak rather than a neighbouring shoulder.
+ROTATION_COARSE_STEP_DEG = 0.5
 
-# Tesseract OSD is used ONLY to resolve the 180° ambiguity after geometry
-# has already estimated the text-line angle. It is never the arbitrary-angle
-# detector. OSD orientation_conf is typically a small float; we stay conservative.
-OSD_MIN_ORIENTATION_CONFIDENCE = 1.5
-OSD_MAX_AXIS_DEVIATION_DEG = 15.0
+# Confidence needed before a *large* off-axis residual is applied. Below this
+# the residual is dropped to zero and only the OSD quadrant is used. Calibrated
+# against the sparse pages that produced the only large residual errors: they
+# scored around 0.23-0.35, correctly measured pages 0.40-0.90.
+ROTATION_RESIDUAL_CONFIDENCE_THRESHOLD = 0.45
+
+# Tesseract OSD decides the quadrant (0/90/180/270) and nothing else. This is
+# the raw open-ended ``orientation_conf`` scale, not a 0-1 probability.
+# Calibrated over 500 page/angle combinations; see orientation/osd_direction.py
+# for the full table. 1.0 (the value used by the sibling model-repo project)
+# admits 23 wrong quadrants; 5.0 admits none at 62% coverage.
+OSD_MIN_ORIENTATION_CONFIDENCE = 5.0
 
 # ---------------------------------------------------------------------------
 # Mirror
 # ---------------------------------------------------------------------------
 MIRROR_CONFIDENCE_THRESHOLD = 0.65
 MIRROR_MIN_LINE_COUNT = 3
+# Structural gate: how much more LTR-like the flipped page must look before an
+# OCR confirmation pass is worth running. Ordinary pages stop here.
 MIRROR_SCORE_MARGIN = 0.10
-# Business rule: if making the mirrored candidate look like an upright LTR
-# page would require an extra rotation greater than this, abstain.
-# See orientation/mirror_detector.py for the exact calculation.
+# Confirmation gate: how much better the flipped page must actually read.
+MIRROR_OCR_MARGIN = 0.20
+# Business rule: a horizontal flip must map a tilt of alpha to exactly -alpha.
+# If explaining the page as mirrored needs more rotation than this on top of the
+# flip, the mirror evidence is rejected. See orientation/mirror_detector.py.
 MIRROR_MAX_EXTRA_ROTATION_DEG = 5.0
 
 # ---------------------------------------------------------------------------
@@ -73,7 +82,11 @@ SKEW_FINE_STEP_DEG = 0.05
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
-VALIDATION_MIN_IMPROVEMENT_RATIO = 0.02
+# A correction is rejected when alignment drops by more than this fraction.
+# Not "must improve": a correct 180° turn leaves line geometry unchanged and
+# resampling costs a little sharpness, so strict improvement would reject
+# correct corrections.
+VALIDATION_REGRESSION_TOLERANCE = 0.05
 
 # ---------------------------------------------------------------------------
 # Output
@@ -115,25 +128,20 @@ class PipelineConfig:
     analysis_max_dimension: int = ANALYSIS_MAX_DIMENSION
     analysis_coarse_max_dimension: int = ANALYSIS_COARSE_MAX_DIMENSION
     quality_review_threshold: float = QUALITY_REVIEW_THRESHOLD
-    rotation_confidence_threshold: float = ROTATION_CONFIDENCE_THRESHOLD
     rotation_coarse_step_deg: float = ROTATION_COARSE_STEP_DEG
-    rotation_fine_step_deg: float = ROTATION_FINE_STEP_DEG
-    rotation_min_text_components: int = ROTATION_MIN_TEXT_COMPONENTS
-    rotation_min_text_lines: int = ROTATION_MIN_TEXT_LINES
-    rotation_signal_agreement_deg: float = ROTATION_SIGNAL_AGREEMENT_DEG
-    rotation_min_peak_margin: float = ROTATION_MIN_PEAK_MARGIN
+    rotation_residual_confidence_threshold: float = ROTATION_RESIDUAL_CONFIDENCE_THRESHOLD
     osd_min_orientation_confidence: float = OSD_MIN_ORIENTATION_CONFIDENCE
-    osd_max_axis_deviation_deg: float = OSD_MAX_AXIS_DEVIATION_DEG
     mirror_confidence_threshold: float = MIRROR_CONFIDENCE_THRESHOLD
     mirror_min_line_count: int = MIRROR_MIN_LINE_COUNT
     mirror_score_margin: float = MIRROR_SCORE_MARGIN
+    mirror_ocr_margin: float = MIRROR_OCR_MARGIN
     mirror_max_extra_rotation_deg: float = MIRROR_MAX_EXTRA_ROTATION_DEG
     max_skew_angle: float = MAX_SKEW_ANGLE
     skew_confidence_threshold: float = SKEW_CONFIDENCE_THRESHOLD
     skew_min_abs_to_apply: float = SKEW_MIN_ABS_TO_APPLY
     skew_coarse_step_deg: float = SKEW_COARSE_STEP_DEG
     skew_fine_step_deg: float = SKEW_FINE_STEP_DEG
-    validation_min_improvement_ratio: float = VALIDATION_MIN_IMPROVEMENT_RATIO
+    validation_regression_tolerance: float = VALIDATION_REGRESSION_TOLERANCE
     output_image_format: str = OUTPUT_IMAGE_FORMAT
     excel_filename: str = EXCEL_FILENAME
     recursive: bool = True

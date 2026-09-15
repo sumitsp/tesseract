@@ -1,308 +1,246 @@
-"""Stage 5 — mirror detection AFTER rotation has been corrected.
+"""Stage 5 — horizontal mirroring, after rotation and before fine tilt.
 
-A page must already be approximately upright. This detector never jointly
-optimises rotation + mirror.
+Runs on a page that is already upright, because every cue used here is defined
+on upright left-to-right geometry: a quarter-turned page has no meaningful "left
+margin", and rotation and horizontal flip do not commute for 90/270.
 
-Decision
---------
-Compare classical LTR text-line evidence on the upright page vs the same
-page after a horizontal flip. Optionally confirm with a cheap Tesseract
-word-confidence vote on a downscaled copy.
+Why this stage is built to say NO
+---------------------------------
+Mirrored pages are rare and flipping a good page is severely destructive, so the
+cost of the two errors is nowhere near symmetric. A purely structural detector of
+this kind was measured in the sibling ``model-repo`` project reporting mirror on 3
+of 12 pages that were not mirrored — a 25% false-positive rate — and that project
+ended up recording its verdict but never applying it.
 
-Conservatism
-------------
-Ambiguous evidence → mirror=UNKNOWN, do not flip.
+So structural evidence here is only a *gate*, never the decision. Ordinary pages
+fail the gate immediately and cost nothing beyond two cheap projections. Only a
+page that looks genuinely reversed pays for a Tesseract confirmation pass, and
+only agreement between the two lines of evidence flips anything. Anything short
+of that is reported UNKNOWN and left untouched.
 
-Special 5-degree business rule
-------------------------------
-A valid mirror correction is a *pure horizontal flip*. Residual skew from
-the previous stage is not a mirror signal: a horizontal flip *negates*
-small line angles (a +7° clockwise lean becomes -7°).
+Structural cue
+--------------
+Left-to-right text has tightly clustered line *starts* on the left and a ragged
+right edge. Mirroring swaps that. Measured as the spread of line left-edges
+versus right-edges, which is a text-line property rather than a pixel-density
+one — a left/right ink balance is not usable on its own, since page layout, not
+reading direction, decides which half of a form holds more ink.
 
-Define:
+The 5-degree rule
+-----------------
+A horizontal flip maps a text tilt of alpha to exactly -alpha; nothing else about
+the geometry may change. So measure the deskew angle on the page as it stands
+(``alpha_original``) and on the flipped candidate (``alpha_flipped``). For a
+genuine mirror::
 
-    orig_α  = CCW angle in [-15°, +15°] that best aligns the unflipped page
-    flip_α  = CCW angle in [-15°, +15°] that best aligns the flipped page
-    expected_flip_α = -orig_α     # skew sign reverses under a horizontal flip
-    extra_rotation  = flip_α - expected_flip_α
+    alpha_flipped == -alpha_original
 
-``extra_rotation`` is the additional rotation the mirrored candidate would
-need *beyond* a pure flip (and the expected skew-sign change). If
+and the residual that a flip cannot account for is::
 
-    abs(extra_rotation) > MIRROR_MAX_EXTRA_ROTATION_DEG (default 5°)
+    extra_rotation = alpha_flipped - (-alpha_original)
+                   = alpha_flipped + alpha_original
 
-the "mirror" explanation is mixing in residual rotation and is unreliable:
-
-    mirror = UNKNOWN
-    mirror_corrected = NO
-    warning = "Mirror detection exceeded 5-degree correction threshold"
-
-``extra_rotation`` is a reliability gate only. It is never applied here.
+When ``|extra_rotation| > mirror_max_extra_rotation_deg`` (5 degrees) the mirror
+hypothesis needs a rotation on top of the flip to explain what is on the page,
+which means the evidence is not a clean mirror. The page is then NOT flipped,
+mirror is reported UNKNOWN, and the row is warned. This is the documented
+interpretation of the requirement; it is a rejection rule, never a licence to
+rotate by up to 5 degrees here.
 """
-
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 
 from image_preprocessing.config import PipelineConfig
+from image_preprocessing.orientation.angle_search import (
+    line_score,
+    search,
+    text_ink,
+)
 from image_preprocessing.orientation.text_geometry import (
-    extract_ink,
     extract_text_components,
     group_text_lines,
-    projection_score_at_angle,
 )
-from image_preprocessing.utils.image_utils import (
-    INTER_DOWNSAMPLE,
-    bgr_to_pil,
-    ensure_bgr,
-    flip_horizontal,
-    resize_max_dimension,
-    to_gray,
-)
+from image_preprocessing.utils.image_utils import flip_horizontal
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
 class MirrorResult:
     mirror: str  # YES | NO | UNKNOWN
-    confidence: float | None
     corrected: bool
-    extra_rotation_deg: float | None
+    confidence: float
     warning: str | None = None
-    diagnostics: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
 
-def _line_ltr_features(ink: np.ndarray) -> dict[str, float]:
+def _edge_alignment(ink: np.ndarray) -> tuple[float, int]:
+    """How much tighter line starts cluster than line ends.
+
+    Positive means left-edges are the tidier margin, i.e. normal LTR. Returns
+    (score, n_lines).
+    """
     comps = extract_text_components(ink)
-    lines = group_text_lines(comps, min_comps=3)
-    w = float(ink.shape[1])
-    if len(lines) < 2:
-        return {
-            "n_lines": float(len(lines)),
-            "left_align": 0.0,
-            "starts_leftness": 0.5,
-            "span_score": 0.0,
-            "spacing": 0.0,
-            "total": 0.0,
-        }
+    lines = group_text_lines(comps, min_comps=4)
+    if len(lines) < 3:
+        return 0.0, len(lines)
     lefts = np.array([ln.x_min for ln in lines], dtype=np.float64)
     rights = np.array([ln.x_max for ln in lines], dtype=np.float64)
-    spans = np.array([ln.x_max - ln.x_min for ln in lines], dtype=np.float64)
-    med_l = float(np.median(lefts))
-    mad_l = float(np.median(np.abs(lefts - med_l))) + 1.0
-    med_r = float(np.median(rights))
-    mad_r = float(np.median(np.abs(rights - med_r))) + 1.0
-    left_align = float(np.clip(w / (mad_l * 8.0), 0.0, 1.0))
-    right_align = float(np.clip(w / (mad_r * 8.0), 0.0, 1.0))
-    starts_leftness = float(np.clip(1.0 - (med_l / (0.55 * w + 1e-9)), 0.0, 1.0))
-    span_score = float(np.clip(np.median(spans) / (0.55 * w + 1e-9), 0.0, 1.0))
 
-    gaps: list[float] = []
-    for ln in lines:
-        xs = sorted(c.x + c.w for c in ln.components)
-        for a, b in zip(xs, xs[1:]):
-            g = b - a
-            if 1 < g < w * 0.25:
-                gaps.append(float(g))
-    if len(gaps) >= 6:
-        g = np.array(gaps, dtype=np.float64)
-        spacing = float(np.clip(1.0 / (1.0 + np.std(g) / (np.mean(g) + 1e-9)), 0.0, 1.0))
-    else:
-        spacing = 0.0
+    def spread(v: np.ndarray) -> float:
+        return float(np.median(np.abs(v - np.median(v)))) + 1.0
 
-    # Prefer a tight LEFT margin over a tight RIGHT margin (LTR pages).
-    margin_preference = float(np.clip(0.5 + 0.5 * (left_align - right_align), 0.0, 1.0))
-    total = (
-        0.30 * left_align
-        + 0.25 * starts_leftness
-        + 0.20 * margin_preference
-        + 0.15 * span_score
-        + 0.10 * spacing
-    )
-    return {
-        "n_lines": float(len(lines)),
-        "left_align": left_align,
-        "right_align": right_align,
-        "starts_leftness": starts_leftness,
-        "span_score": span_score,
-        "spacing": spacing,
-        "margin_preference": margin_preference,
-        "total": float(total),
-    }
+    left_spread = spread(lefts)
+    right_spread = spread(rights)
+    # >0 when the left margin is tighter than the right.
+    score = (right_spread - left_spread) / (right_spread + left_spread)
+    return float(score), len(lines)
 
 
-def _best_extra_rotation(ink: np.ndarray, search: float = 15.0, step: float = 1.0) -> tuple[float, float]:
-    """Angle in [-search, search] that maximises horizontal alignment of ``ink``."""
-    best_a, best_s = 0.0, projection_score_at_angle(ink, 0.0)
-    a = -search
-    while a <= search + 1e-9:
-        s = projection_score_at_angle(ink, float(a))
-        if s > best_s:
-            best_s, best_a = s, float(a)
-        a += step
-    return float(best_a), float(best_s)
-
-
-def _tesseract_confidence_vote(image: np.ndarray, flipped: np.ndarray) -> tuple[float | None, float | None]:
-    """Mean word confidence original vs flipped. None if Tesseract cannot run."""
+def _ocr_strength(image: np.ndarray) -> tuple[int, float]:
+    """(confident word count, mean confidence). (0, 0.0) if unavailable."""
     try:
         import pytesseract
         from pytesseract import Output
-    except Exception:
-        return None, None
-
-    def _mean_conf(img: np.ndarray) -> float | None:
-        work, _ = resize_max_dimension(ensure_bgr(img), 900, interpolation=INTER_DOWNSAMPLE)
-        pil = bgr_to_pil(work)
+    except ImportError:
+        return 0, 0.0
+    try:
+        # psm 6 = uniform block. psm 3's layout pass silently rotates vertical
+        # text, which muddies a left/right comparison.
+        data = pytesseract.image_to_data(image, output_type=Output.DICT, config="--psm 6")
+    except Exception as exc:
+        LOGGER.debug("Mirror OCR check unavailable: %s", exc)
+        return 0, 0.0
+    confs = []
+    for conf, text in zip(data.get("conf", []), data.get("text", [])):
         try:
-            data = pytesseract.image_to_data(pil, output_type=Output.DICT, config="--psm 6")
-        except Exception:
-            return None
-        confs = [int(c) for c in data.get("conf", []) if str(c) not in {"-1", ""}]
-        confs = [c for c in confs if c >= 0]
-        if len(confs) < 5:
-            return None
-        return float(np.mean(confs))
-
-    return _mean_conf(image), _mean_conf(flipped)
+            conf = float(conf)
+        except (TypeError, ValueError):
+            continue
+        text = (text or "").strip()
+        if conf >= 60 and len(text) >= 2 and any(ch.isalnum() for ch in text):
+            confs.append(conf)
+    return len(confs), (float(np.mean(confs)) if confs else 0.0)
 
 
-def detect_mirror(
-    upright_image: np.ndarray,
-    config: PipelineConfig,
-) -> MirrorResult:
-    gray = to_gray(upright_image)
-    analysis, _ = resize_max_dimension(gray, config.analysis_max_dimension)
-    _clahe, _ink, ink = extract_ink(analysis)
-    flipped_ink = flip_horizontal(ink)
+def _deskew_angle(image: np.ndarray, config: PipelineConfig) -> float | None:
+    ink = text_ink(image, config.analysis_max_dimension)
+    est = search(
+        ink,
+        lo=-config.max_skew_angle,
+        hi=config.max_skew_angle + 1e-9,
+        coarse_step=config.skew_coarse_step_deg,
+        fine_steps=(0.1,),
+        scorer=line_score,
+    )
+    return est.angle_cw_deg
 
-    orig_alpha, orig_score = _best_extra_rotation(ink, search=15.0, step=1.0)
-    flip_alpha, flip_score = _best_extra_rotation(flipped_ink, search=15.0, step=1.0)
-    expected_flip_alpha = -orig_alpha
-    extra_rot = float(flip_alpha - expected_flip_alpha)
-    diag: dict[str, Any] = {
-        "orig_align_angle_ccw": orig_alpha,
-        "orig_align_score": orig_score,
-        "flip_align_angle_ccw": flip_alpha,
-        "flip_align_score": flip_score,
-        "expected_flip_align_ccw": expected_flip_alpha,
-        "extra_rotation_deg": extra_rot,
-        "threshold_deg": config.mirror_max_extra_rotation_deg,
-        "rule": (
-            "extra_rotation = flip_α - (-orig_α). A pure horizontal flip "
-            "negates residual skew, so extra_rotation should be ~0. If "
-            "abs(extra_rotation) > MIRROR_MAX_EXTRA_ROTATION_DEG, the "
-            "mirrored candidate only looks plausible after a non-trivial "
-            "extra rotation and is rejected."
-        ),
+
+def detect_mirror(upright_image: np.ndarray, config: PipelineConfig) -> MirrorResult:
+    """Decide whether ``upright_image`` is horizontally mirrored."""
+    ink = text_ink(upright_image, config.analysis_max_dimension)
+    normal_score, n_lines = _edge_alignment(ink)
+    flipped_score, _ = _edge_alignment(flip_horizontal(ink))
+
+    diagnostics: dict = {
+        "edge_alignment_normal": round(normal_score, 4),
+        "edge_alignment_flipped": round(flipped_score, 4),
+        "line_count": n_lines,
     }
 
-    if abs(extra_rot) > config.mirror_max_extra_rotation_deg:
-        return MirrorResult(
-            mirror="UNKNOWN",
-            confidence=None,
-            corrected=False,
-            extra_rotation_deg=round(extra_rot, 2),
-            warning="Mirror detection exceeded 5-degree correction threshold",
-            diagnostics=diag,
-        )
-
-    normal = _line_ltr_features(ink)
-    flipped = _line_ltr_features(flipped_ink)
-    diag["normal"] = normal
-    diag["flipped"] = flipped
-
-    n_lines = min(normal["n_lines"], flipped["n_lines"])
     if n_lines < config.mirror_min_line_count:
         return MirrorResult(
             mirror="UNKNOWN",
-            confidence=round(0.2, 4),
             corrected=False,
-            extra_rotation_deg=round(extra_rot, 2),
-            warning="Mirror evidence insufficient",
-            diagnostics=diag,
+            confidence=0.0,
+            warning="Mirror not determined: too few text lines",
+            diagnostics=diagnostics,
         )
 
-    n_score, f_score = normal["total"], flipped["total"]
-    best = max(n_score, f_score)
-    sep = (best - min(n_score, f_score)) / (best + 1e-9)
-    diag["separation"] = sep
+    # Gate. The flipped page must look clearly more LTR-like than the page as it
+    # stands before anything more expensive happens.
+    structural_margin = flipped_score - normal_score
+    diagnostics["structural_margin"] = round(structural_margin, 4)
+    if structural_margin < config.mirror_score_margin:
+        return MirrorResult(
+            mirror="NO",
+            corrected=False,
+            confidence=round(float(np.clip(0.55 + structural_margin, 0.0, 1.0)), 4),
+            diagnostics=diagnostics,
+        )
 
-    votes = 0
-    if f_score > n_score * (1.0 + config.mirror_score_margin):
-        votes += 1
-    if flipped["starts_leftness"] > normal["starts_leftness"] + 0.08:
-        votes += 1
-    if flipped["left_align"] > normal["left_align"] * 1.08:
-        votes += 1
-    if flipped.get("margin_preference", 0) > normal.get("margin_preference", 0) + 0.08:
-        votes += 1
-    diag["structural_votes"] = votes
-
-    if votes == 2:
-        tess_n, tess_f = _tesseract_confidence_vote(analysis, flip_horizontal(analysis))
-        diag["tesseract_conf_original"] = tess_n
-        diag["tesseract_conf_flipped"] = tess_f
-        if tess_n is not None and tess_f is not None:
-            if tess_f > tess_n + 8:
-                votes += 1
-                diag["tesseract_vote"] = "flipped"
-            elif tess_n > tess_f + 8:
-                votes -= 1
-                diag["tesseract_vote"] = "original"
-            else:
-                diag["tesseract_vote"] = "tie"
-    else:
-        diag["tesseract_vote"] = "skipped_not_borderline"
-
-    want_flip = votes >= 3 and f_score > n_score and sep >= 0.07
-    conf = float(np.clip(0.20 + 2.4 * sep + 0.10 * max(votes, 0), 0.0, 1.0))
-
-    ambiguous = (
-        sep < 0.07
-        or best < 0.15
-        or votes < 3
-        or conf < config.mirror_confidence_threshold
-        or not want_flip
-    )
-    if ambiguous and not want_flip:
-        # Clear "not mirrored" still needs enough evidence to say NO vs UNKNOWN.
-        if sep >= 0.07 and n_score > f_score and votes <= 1 and conf >= 0.35:
-            return MirrorResult(
-                mirror="NO",
-                confidence=round(min(max(conf, 0.55), 1.0), 4),
-                corrected=False,
-                extra_rotation_deg=round(extra_rot, 2),
-                warning=None,
-                diagnostics=diag,
-            )
+    # The 5-degree rule, before spending an OCR pass.
+    alpha_original = _deskew_angle(upright_image, config)
+    flipped_image = flip_horizontal(upright_image)
+    alpha_flipped = _deskew_angle(flipped_image, config)
+    if alpha_original is None or alpha_flipped is None:
         return MirrorResult(
             mirror="UNKNOWN",
-            confidence=round(min(conf, 0.49), 4),
             corrected=False,
-            extra_rotation_deg=round(extra_rot, 2),
-            warning="Mirror evidence ambiguous",
-            diagnostics=diag,
+            confidence=0.0,
+            warning="Mirror not determined: insufficient text geometry",
+            diagnostics=diagnostics,
         )
-
-    if want_flip and conf >= config.mirror_confidence_threshold:
+    extra_rotation = float(alpha_flipped + alpha_original)
+    diagnostics["alpha_original"] = round(float(alpha_original), 3)
+    diagnostics["alpha_flipped"] = round(float(alpha_flipped), 3)
+    diagnostics["extra_rotation_deg"] = round(extra_rotation, 3)
+    if abs(extra_rotation) > config.mirror_max_extra_rotation_deg:
         return MirrorResult(
-            mirror="YES",
-            confidence=round(conf, 4),
-            corrected=True,
-            extra_rotation_deg=round(extra_rot, 2),
-            warning=None,
-            diagnostics=diag,
+            mirror="UNKNOWN",
+            corrected=False,
+            confidence=0.0,
+            warning="Mirror detection exceeded 5-degree correction threshold",
+            diagnostics=diagnostics,
         )
 
+    # Confirmation. Real text reads far better the right way round; a mirrored
+    # page yields garbage regardless of how tidy its margins look.
+    normal_words, normal_conf = _ocr_strength(upright_image)
+    flipped_words, flipped_conf = _ocr_strength(flipped_image)
+    diagnostics["ocr_normal"] = [normal_words, round(normal_conf, 1)]
+    diagnostics["ocr_flipped"] = [flipped_words, round(flipped_conf, 1)]
+
+    if normal_words + flipped_words == 0:
+        return MirrorResult(
+            mirror="UNKNOWN",
+            corrected=False,
+            confidence=0.0,
+            warning="Mirror not confirmed: no OCR evidence available",
+            diagnostics=diagnostics,
+        )
+
+    normal_strength = normal_words * max(normal_conf, 1.0)
+    flipped_strength = flipped_words * max(flipped_conf, 1.0)
+    total = normal_strength + flipped_strength
+    ocr_margin = (flipped_strength - normal_strength) / (total + 1e-9)
+    diagnostics["ocr_margin"] = round(ocr_margin, 4)
+
+    if ocr_margin < config.mirror_ocr_margin:
+        return MirrorResult(
+            mirror="NO",
+            corrected=False,
+            confidence=round(float(np.clip(0.5 + abs(ocr_margin), 0.0, 1.0)), 4),
+            diagnostics=diagnostics,
+        )
+
+    confidence = float(np.clip(0.45 + 0.5 * ocr_margin + 0.5 * structural_margin, 0.0, 1.0))
+    if confidence < config.mirror_confidence_threshold:
+        return MirrorResult(
+            mirror="UNKNOWN",
+            corrected=False,
+            confidence=round(confidence, 4),
+            warning="Mirror evidence too weak to act on; page not flipped",
+            diagnostics=diagnostics,
+        )
     return MirrorResult(
-        mirror="UNKNOWN",
-        confidence=round(min(conf, 0.49), 4),
-        corrected=False,
-        extra_rotation_deg=round(extra_rot, 2),
-        warning="Mirror evidence ambiguous",
-        diagnostics=diag,
+        mirror="YES",
+        corrected=True,
+        confidence=round(confidence, 4),
+        diagnostics=diagnostics,
     )
