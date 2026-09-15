@@ -26,8 +26,9 @@ from image_preprocessing.config import (  # noqa: E402
     LOW_DPI_WARNING_THRESHOLD,
     MAX_SKEW_ANGLE,
     MIRROR_CONFIDENCE_THRESHOLD,
+    OSD_MIN_ORIENTATION_CONFIDENCE,
     QUALITY_REVIEW_THRESHOLD,
-    ROTATION_CONFIDENCE_THRESHOLD,
+    ROTATION_RESIDUAL_CONFIDENCE_THRESHOLD,
     SKEW_CONFIDENCE_THRESHOLD,
     SUPPORTED_EXTENSIONS,
     TARGET_DPI,
@@ -51,8 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  1. Quality / DPI analysis\n"
             "  2. Standardize DPI (downsample to 400 only; never upscale)\n"
             "  3. Printed vs handwritten (existing ConvNeXt classifier)\n"
-            "  4. Arbitrary rotation (classical geometry) + Tesseract OSD for 180°\n"
-            "  5. Mirror detection (after rotation only)\n"
+            "  4. Residual angle (classical) + Tesseract OSD for the quadrant\n"
+            "  5. Mirror detection (after rotation only; OCR-confirmed)\n"
             "  6. Fine tilt / skew (after rotation + mirror)\n"
             "  7. Validate; reject corrections that make alignment worse\n"
             "  8. Save corrected page\n"
@@ -85,9 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-skew-angle", type=float, default=MAX_SKEW_ANGLE)
     parser.add_argument(
-        "--rotation-confidence-threshold",
+        "--osd-min-confidence",
         type=float,
-        default=ROTATION_CONFIDENCE_THRESHOLD,
+        default=OSD_MIN_ORIENTATION_CONFIDENCE,
+        help="Minimum Tesseract OSD orientation_conf to accept a quadrant",
+    )
+    parser.add_argument(
+        "--rotation-residual-confidence-threshold",
+        type=float,
+        default=ROTATION_RESIDUAL_CONFIDENCE_THRESHOLD,
     )
     parser.add_argument(
         "--mirror-confidence-threshold",
@@ -126,7 +133,10 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
     cfg.target_dpi = int(args.target_dpi)
     cfg.low_dpi_warning_threshold = int(args.low_dpi_threshold)
     cfg.max_skew_angle = float(args.max_skew_angle)
-    cfg.rotation_confidence_threshold = float(args.rotation_confidence_threshold)
+    cfg.osd_min_orientation_confidence = float(args.osd_min_confidence)
+    cfg.rotation_residual_confidence_threshold = float(
+        args.rotation_residual_confidence_threshold
+    )
     cfg.mirror_confidence_threshold = float(args.mirror_confidence_threshold)
     cfg.skew_confidence_threshold = float(args.skew_confidence_threshold)
     cfg.quality_review_threshold = float(args.quality_threshold)
