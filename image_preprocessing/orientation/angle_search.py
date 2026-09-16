@@ -209,6 +209,22 @@ def axis_score(xs: np.ndarray, ys: np.ndarray, angle_cw_deg: float) -> float:
     )
 
 
+def horizontal_axis_confidence(image: np.ndarray, max_dim: int) -> float:
+    """Confidence that text lines run horizontally rather than vertically.
+
+    This deliberately answers only the axis question. It cannot distinguish
+    upright from upside-down, but fine deskew does not need that distinction:
+    a line's skew is identical after a 180-degree turn.
+    """
+    ink = text_ink(image, max_dim)
+    xs, ys = ink_points(ink)
+    if len(xs) < MIN_POINTS:
+        return 0.0
+    horizontal = line_score(xs, ys, 0.0)
+    vertical = line_score(xs, ys, 90.0)
+    return float(horizontal / (horizontal + vertical + 1e-12))
+
+
 def _refine(
     score_at: Callable[[float], float],
     best: float,

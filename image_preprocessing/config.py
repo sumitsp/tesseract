@@ -78,6 +78,9 @@ SKEW_CONFIDENCE_THRESHOLD = 0.55
 SKEW_MIN_ABS_TO_APPLY = 0.20
 SKEW_COARSE_STEP_DEG = 0.5
 SKEW_FINE_STEP_DEG = 0.05
+# Allows deskew when OSD cannot distinguish 0 from 180, but blocks deskew on
+# sideways pages. This is a horizontal-vs-vertical projection ratio.
+TILT_HORIZONTAL_AXIS_CONFIDENCE = 0.58
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -141,6 +144,7 @@ class PipelineConfig:
     skew_min_abs_to_apply: float = SKEW_MIN_ABS_TO_APPLY
     skew_coarse_step_deg: float = SKEW_COARSE_STEP_DEG
     skew_fine_step_deg: float = SKEW_FINE_STEP_DEG
+    tilt_horizontal_axis_confidence: float = TILT_HORIZONTAL_AXIS_CONFIDENCE
     validation_regression_tolerance: float = VALIDATION_REGRESSION_TOLERANCE
     output_image_format: str = OUTPUT_IMAGE_FORMAT
     excel_filename: str = EXCEL_FILENAME

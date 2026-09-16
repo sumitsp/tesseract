@@ -45,6 +45,7 @@ from image_preprocessing.orientation.arbitrary_rotation import (
     detect_rotation,
     overlay_ink,
 )
+from image_preprocessing.orientation.angle_search import horizontal_axis_confidence
 from image_preprocessing.orientation.mirror_detector import detect_mirror
 from image_preprocessing.orientation.skew_detector import detect_skew
 from image_preprocessing.quality.quality_analyzer import analyze_quality
@@ -274,9 +275,8 @@ def process_page(
             ),
         )
 
-    # Only a confirmed upright page earns the mirror and tilt stages. Both are
-    # defined on upright geometry, and acting on an unconfirmed orientation is
-    # how a page ends up more crooked than it started.
+    # Mirror needs a confirmed readable direction. Fine tilt only needs the
+    # horizontal axis: 0 and 180 degrees have identical line skew.
     orientation_confirmed = False
 
     if rot.status == "UNCERTAIN":
@@ -301,6 +301,14 @@ def process_page(
             result.add_warning(
                 f"Rotation rejected by validation ({validation.reason}); page preserved"
             )
+
+    axis_confidence = horizontal_axis_confidence(
+        working, config.analysis_max_dimension
+    )
+    horizontal_axis_confirmed = (
+        orientation_confirmed
+        or axis_confidence >= config.tilt_horizontal_axis_confidence
+    )
 
     if debug_dir is not None:
         _save_debug(
@@ -351,13 +359,14 @@ def process_page(
     if skew.warning:
         result.add_warning(skew.warning)
 
-    if not orientation_confirmed:
-        # Measured and reported so the column is informative, but never applied:
-        # a tilt about the wrong axis is meaningless on a page whose upright
-        # orientation was never confirmed.
+    if not horizontal_axis_confirmed:
+        # A sideways page must not receive a small-angle correction. Report the
+        # measurement, but keep the pixels unchanged.
         result.tilt_angle = skew.tilt_cw_deg
         result.tilt_status = "NOT_APPLIED"
-        result.add_warning("Tilt not applied: page orientation was not confirmed")
+        result.add_warning(
+            "Tilt not applied: horizontal text axis was not confirmed"
+        )
     elif skew.status == "UNCERTAIN":
         result.tilt_angle = None
         result.tilt_status = "UNCERTAIN"
