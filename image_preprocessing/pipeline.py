@@ -570,6 +570,9 @@ def run_blob_pipeline(
         LOGGER.warning("Classifier could not be loaded (%s); pages will record ERROR", exc)
 
     results: list[PageResult] = []
+    report_path = report_layout.report / config.excel_filename
+    write_excel_report(report_path, results, config.quality_review_threshold)
+    LOGGER.info("Created live report: %s", report_path)
     doc_index = 0
     for folder_name in chart_folders:
         blob_names = list_images_in_folder(folder_blobs, folder_name)
@@ -607,19 +610,22 @@ def run_blob_pipeline(
                 failed.add_warning(f"ERROR: {exc}")
                 failed.freeze_warnings()
                 results.append(failed)
+                write_excel_report(
+                    report_path, results, config.quality_review_threshold
+                )
                 continue
 
             for page in pages:
                 LOGGER.info(
                     "  Processing %s page %s", page.document_name, page.page_number
                 )
-                results.append(
-                    process_page_safe(
-                        page, config, classifier=classifier, layout=layout
-                    )
+                result = process_page_safe(
+                    page, config, classifier=classifier, layout=layout
+                )
+                results.append(result)
+                write_excel_report(
+                    report_path, results, config.quality_review_threshold
                 )
 
-    report_path = report_layout.report / config.excel_filename
-    write_excel_report(report_path, results, config.quality_review_threshold)
     LOGGER.info("Wrote %s (%s page rows)", report_path, len(results))
     return report_path
