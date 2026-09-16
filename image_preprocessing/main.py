@@ -144,6 +144,32 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
     return cfg
 
 
+def _check_tesseract_runtime() -> bool:
+    try:
+        import pytesseract
+    except ImportError:
+        print(
+            f"ERROR: pytesseract is not installed for this Python:\n  {sys.executable}\n"
+            "Install and run with the project venv, e.g.:\n"
+            "  .\\venv\\Scripts\\python.exe -m pip install -r requirements.txt\n"
+            "  .\\venv\\Scripts\\python.exe main.py --input ... --output ...",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception as exc:
+        print(
+            "ERROR: Tesseract OCR binary not found on PATH "
+            f"(pytesseract error: {exc}).\n"
+            "Install Tesseract for Windows and add it to PATH, then run:\n"
+            "  tesseract --list-langs   (must include 'osd')",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -158,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger().addHandler(file_handler)
 
     cfg = config_from_args(args)
+    if not _check_tesseract_runtime():
+        return 1
+
     from image_preprocessing.pipeline import run_pipeline
 
     report = run_pipeline(Path(args.input), output, cfg)

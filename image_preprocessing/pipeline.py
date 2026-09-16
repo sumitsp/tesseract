@@ -19,6 +19,7 @@ A failed page does not stop the job.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -173,9 +174,13 @@ def _detect_orientation(image: np.ndarray, config: PipelineConfig) -> dict:
         method = "osd"
         osd_confidence = float(osd["confidence"])
     else:
-        fallback_180 = upright_180_when_osd_abstains(
-            bgr, analysis_max_dimension=config.analysis_max_dimension
-        )
+        fallback_180 = None
+        try:
+            fallback_180 = upright_180_when_osd_abstains(
+                bgr, analysis_max_dimension=config.analysis_max_dimension
+            )
+        except Exception as exc:
+            LOGGER.warning("180° layout fallback failed: %s", exc)
         if fallback_180 == 180:
             orientation = 180.0
             method = "upright_180_fallback"
@@ -309,12 +314,23 @@ def process_page(
     if orient["method"] == "osd_undecided":
         result.rotation_status = "UNCERTAIN"
         result.add_warning("OSD could not determine orientation; page left unrotated")
-        LOGGER.warning(
-            "OSD undecided for %s page %s — sideways pages stay sideways. "
-            "Check tesseract on PATH and osd traineddata (tesseract --list-langs).",
-            page.document_name,
-            page.page_number,
-        )
+        try:
+            import pytesseract  # noqa: F401
+        except ImportError:
+            LOGGER.warning(
+                "OSD skipped for %s page %s: pytesseract not in %s — "
+                "run with .\\venv\\Scripts\\python.exe main.py",
+                page.document_name,
+                page.page_number,
+                sys.executable,
+            )
+        else:
+            LOGGER.warning(
+                "OSD undecided for %s page %s — sideways pages stay sideways. "
+                "Check tesseract on PATH and osd traineddata (tesseract --list-langs).",
+                page.document_name,
+                page.page_number,
+            )
     elif orient["method"] == "upright_180_fallback":
         result.rotation_status = "APPLIED"
         result.add_warning(

@@ -167,11 +167,16 @@ def remove_page_borders(ink: np.ndarray, margin_frac: float = 0.02) -> np.ndarra
 
 def remove_tiny_noise(ink: np.ndarray, min_area: int = 12) -> np.ndarray:
     num, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
-    out = np.zeros_like(ink)
-    for i in range(1, num):
-        if stats[i, cv2.CC_STAT_AREA] >= min_area:
-            out[labels == i] = 255
-    return out
+    if num <= 1:
+        return ink
+    # Avoid O(components × pixels) loops — large TIFFs can have 100k+ specks.
+    if num > 50_000:
+        return ink
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    keep = np.nonzero(areas >= min_area)[0] + 1
+    if keep.size == 0:
+        return np.zeros_like(ink)
+    return (np.isin(labels, keep).astype(np.uint8)) * 255
 
 
 def remove_ruling_lines(ink: np.ndarray, min_line_len_frac: float = 0.12) -> np.ndarray:
