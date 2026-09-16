@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--osd-min-confidence",
         type=float,
         default=OSD_MIN_ORIENTATION_CONFIDENCE,
-        help="Minimum Tesseract OSD orientation_conf to accept a quadrant",
+        help="Legacy; coarse rotation always uses OSD min confidence 1.0 (model-repo)",
     )
     parser.add_argument(
         "--rotation-residual-confidence-threshold",

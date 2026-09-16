@@ -1,76 +1,59 @@
-"""Coarse page orientation from Tesseract OSD.
-
-Replaces the coarse-rotation step of ``rotation.PageOrientationDetector``,
-which could not recover a rotated page. Measured on the demo chart, three pages
-through all four orientations:
-
-    detector : 0 of 6 sideways pages recovered. A 90 CW page was reported as 0
-               or 180, never 270; a 270 CW page as 0, never 90. Worse,
-               rotation_confidence was 1.000 on those wrong answers, so there
-               was no way to tell the good answers from the bad.
-    OSD      : 4 of 4 exact, on every page tried.
-
-Tesseract's own orientation-and-script detection is a different algorithm from
-the ink-geometry heuristics in rotation.py — it recognises character shapes, so
-"which way is up" is the question it was built for.
-
-**Convention.** ``image_to_osd`` reports ``rotate`` as the CLOCKWISE rotation
-to APPLY to make the page upright, which is exactly what ``rotation.py`` means
-by ``OrientationResult.rotation``. Verified rather than assumed:
-
-    input 90 CW  -> rotate 270      input 180 -> rotate 180
-    input 270 CW -> rotate 90       upright   -> rotate 0
-
-**What this does not do.** OSD says nothing about mirroring or fine tilt. Tilt
-still comes from the geometric detector, which measures it well. Mirror is left
-alone deliberately — see `quality_rotation_hw`.
-
-Requires the `osd` traineddata, which ships with a standard Tesseract install.
-Every failure path returns None so the caller falls back rather than failing a
-page: orientation detection is an optimisation, not a precondition.
-"""
+"""Coarse page orientation from Tesseract OSD (model-repo contract)."""
 from __future__ import annotations
 
 import logging
 from typing import Any, Optional
 
+import cv2
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
-# Tesseract reports orientation confidence on an open-ended scale; observed
-# values on real scans run ~2-15, and the documented failure mode is a value
-# near zero on an image with too little text to judge. Below this we keep the
-# page as-is rather than guess — a wrongly rotated page is worse than an
-# uncorrected one, which is the whole lesson of the detector this replaces.
+# Same as model-repo stages/lib/imaging/osd.py — do not raise this via config.
 MIN_CONFIDENCE = 1.0
 
-# OSD needs enough glyphs to vote on. A near-blank page produces a confident
-# nonsense answer, so charts of scanned dividers do not get spun around.
-MIN_CHARACTERS = 20
+# OSD can fail on very large rasters; retry on a downscaled copy with the same answer.
+OSD_MAX_DIMENSION = 2400
 
 
-def detect_rotation(
-    image: Any,
-    *,
-    min_confidence: float = MIN_CONFIDENCE,
-) -> Optional[dict[str, Any]]:
-    """Clockwise degrees to rotate `image` upright, or None if undecidable.
+def _prepare_rgb(image: Any) -> np.ndarray | None:
+    if image is None or not hasattr(image, "shape"):
+        return None
+    arr = np.asarray(image)
+    if arr.ndim == 2:
+        rgb = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)
+    elif arr.ndim == 3 and arr.shape[2] >= 3:
+        # pytesseract treats ndarray as RGB; OpenCV loads BGR.
+        rgb = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_BGR2RGB)
+    else:
+        return None
+    if rgb.dtype != np.uint8:
+        rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(rgb)
 
-    `image` is an OpenCV BGR array. Returns
-    ``{"rotation": 0|90|180|270, "confidence": float, "script": str}``.
-    """
+
+def _downscale(rgb: np.ndarray, max_dim: int) -> np.ndarray:
+    h, w = rgb.shape[:2]
+    longest = max(h, w)
+    if longest <= max_dim:
+        return rgb
+    scale = max_dim / float(longest)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _run_osd(rgb: np.ndarray) -> Optional[dict[str, Any]]:
     try:
         import pytesseract
         from pytesseract import Output
     except ImportError as exc:
-        logger.debug("OSD unavailable (%s)", exc)
+        logger.warning("OSD unavailable (pytesseract): %s", exc)
         return None
 
     try:
-        osd = pytesseract.image_to_osd(image, output_type=Output.DICT)
+        osd = pytesseract.image_to_osd(rgb, output_type=Output.DICT)
     except Exception as exc:
-        # Tesseract raises "Too few characters" on sparse pages, and a
-        # TesseractError when the osd traineddata is absent. Both mean "no
-        # answer", not "this page is broken".
         logger.debug("OSD did not resolve: %s", str(exc).splitlines()[0])
         return None
 
@@ -83,9 +66,12 @@ def detect_rotation(
     if rotation not in (0, 90, 180, 270):
         logger.debug("OSD returned a non-quadrant rotation: %s", rotation)
         return None
-    if confidence < min_confidence:
-        logger.debug("OSD confidence %.2f below %.2f; leaving page as-is",
-                     confidence, min_confidence)
+    if confidence < MIN_CONFIDENCE:
+        logger.debug(
+            "OSD confidence %.2f below %.2f; leaving page as-is",
+            confidence,
+            MIN_CONFIDENCE,
+        )
         return None
 
     return {
@@ -93,3 +79,33 @@ def detect_rotation(
         "confidence": confidence,
         "script": str(osd.get("script") or ""),
     }
+
+
+def detect_rotation(
+    image: Any,
+    *,
+    min_confidence: float | None = None,
+) -> Optional[dict[str, Any]]:
+    """Clockwise degrees to rotate ``image`` upright, or None if undecidable."""
+    if min_confidence is not None and min_confidence > MIN_CONFIDENCE:
+        logger.debug(
+            "Ignoring min_confidence=%.2f; model-repo uses fixed %.2f",
+            min_confidence,
+            MIN_CONFIDENCE,
+        )
+
+    rgb = _prepare_rgb(image)
+    if rgb is None:
+        return None
+
+    result = _run_osd(rgb)
+    if result is not None:
+        return result
+
+    small = _downscale(rgb, OSD_MAX_DIMENSION)
+    if small.shape != rgb.shape:
+        result = _run_osd(small)
+        if result is not None:
+            logger.debug("OSD succeeded on downscaled copy (%sx%s)", small.shape[1], small.shape[0])
+        return result
+    return None

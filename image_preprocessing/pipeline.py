@@ -45,7 +45,10 @@ from image_preprocessing.orientation.page_orientation import (
     PageOrientationDetector,
     correct_image,
 )
-from image_preprocessing.orientation.tesseract_osd import detect_rotation as osd_rotation
+from image_preprocessing.orientation.tesseract_osd import (
+    MIN_CONFIDENCE as OSD_MIN_CONFIDENCE,
+    detect_rotation as osd_rotation,
+)
 from image_preprocessing.quality.quality_analyzer import analyze_quality
 from image_preprocessing.reporting.excel_report import write_excel_report
 from image_preprocessing.results import LoadedPage, PageResult
@@ -157,24 +160,13 @@ def _annotate(image: np.ndarray, text: str) -> np.ndarray:
 
 
 def _detect_orientation(image: np.ndarray, config: PipelineConfig) -> dict:
-    """OSD coarse rotation, geometric tilt, recorded mirror. Never geometric rotation."""
-    try:
-        detected = PageOrientationDetector().detect(image)
-    except Exception as exc:
-        LOGGER.warning("Orientation detect fallback: %s", exc)
-        return {
-            "orientation_angle": 0.0,
-            "tilt_angle": 0.0,
-            "mirrored": False,
-            "method": "fallback",
-            "osd_confidence": 0.0,
-            "tilt_confidence": None,
-            "mirror_confidence": None,
-        }
+    """OSD coarse rotation first (model-repo); tilt/mirror from geometry only."""
+    bgr = ensure_bgr(np.ascontiguousarray(image))
+    if bgr.dtype != np.uint8:
+        bgr = np.clip(bgr, 0, 255).astype(np.uint8)
 
-    tilt = float(detected.get("tilt") or detected.get("tilt_angle") or 0)
-    mirrored = bool(detected.get("mirror") or detected.get("mirrored") or False)
-    osd = osd_rotation(image, min_confidence=config.osd_min_orientation_confidence)
+    # Always run OSD — never skip because the geometric detector failed.
+    osd = osd_rotation(bgr)
     if osd is not None:
         orientation = float(osd["rotation"])
         method = "osd"
@@ -184,14 +176,30 @@ def _detect_orientation(image: np.ndarray, config: PipelineConfig) -> dict:
         method = "osd_undecided"
         osd_confidence = 0.0
 
+    tilt = 0.0
+    mirrored = False
+    tilt_confidence = None
+    mirror_confidence = None
+    try:
+        detected = PageOrientationDetector(
+            analysis_max_dimension=config.analysis_max_dimension,
+            max_tilt_to_apply=5.0,
+        ).detect(bgr)
+        tilt = float(detected.get("tilt") or detected.get("tilt_angle") or 0)
+        mirrored = bool(detected.get("mirror") or detected.get("mirrored") or False)
+        tilt_confidence = detected.get("tilt_confidence")
+        mirror_confidence = detected.get("mirror_confidence")
+    except Exception as exc:
+        LOGGER.warning("Tilt/mirror detection failed (OSD rotation still used): %s", exc)
+
     return {
         "orientation_angle": orientation,
         "tilt_angle": tilt,
         "mirrored": mirrored,
         "method": method,
         "osd_confidence": osd_confidence,
-        "tilt_confidence": detected.get("tilt_confidence"),
-        "mirror_confidence": detected.get("mirror_confidence"),
+        "tilt_confidence": tilt_confidence,
+        "mirror_confidence": mirror_confidence,
     }
 
 
@@ -289,34 +297,50 @@ def process_page(
     if orient["method"] == "osd_undecided":
         result.rotation_status = "UNCERTAIN"
         result.add_warning("OSD could not determine orientation; page left unrotated")
+        LOGGER.warning(
+            "OSD undecided for %s page %s — sideways pages stay sideways. "
+            "Check tesseract on PATH and osd traineddata (tesseract --list-langs).",
+            page.document_name,
+            page.page_number,
+        )
     elif orientation != 0:
         result.rotation_status = "APPLIED"
     else:
         result.rotation_status = "NOT_NEEDED"
 
-    if orient["method"] == "fallback":
-        result.rotation_status = "UNCERTAIN"
-        result.tilt_status = "NOT_NEEDED"
-        result.add_warning("Orientation detection failed; page left unchanged")
-    elif abs(tilt) >= 1e-4:
+    if abs(tilt) >= 1e-4:
         result.tilt_status = "APPLIED"
     else:
         result.tilt_status = "NOT_NEEDED"
         result.tilt_angle = 0.0
 
-    needs_correction = orientation != 0 or abs(tilt) >= 1e-4
-    if needs_correction and orient["method"] != "fallback":
+    apply_osd_rotation = orient["method"] == "osd" and int(orientation) % 360 != 0
+    apply_tilt = abs(tilt) >= 1e-4
+    needs_correction = apply_osd_rotation or apply_tilt
+
+    if needs_correction:
         try:
+            LOGGER.info(
+                "Correcting %s page %s: OSD rotation=%s tilt=%.2f (min_conf=%.1f)",
+                page.document_name,
+                page.page_number,
+                int(orientation) % 360 if apply_osd_rotation else 0,
+                tilt if apply_tilt else 0.0,
+                OSD_MIN_CONFIDENCE,
+            )
             working = correct_image(
                 working,
                 {
-                    "rotation": int(orientation) % 360,
-                    "tilt": tilt,
+                    "rotation": int(orientation) % 360 if apply_osd_rotation else 0,
+                    "tilt": tilt if apply_tilt else 0.0,
                     "mirror": False,
                 },
+                max_tilt_abs=5.0,
             )
-            rotation_applied = orientation
-            tilt_applied = tilt
+            if apply_osd_rotation:
+                rotation_applied = orientation
+            if apply_tilt:
+                tilt_applied = tilt
         except Exception as exc:
             LOGGER.warning(
                 "Orientation correction failed for %s page %s: %s",
