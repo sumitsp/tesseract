@@ -44,6 +44,7 @@ from image_preprocessing.ingest.pdf_loader import is_pdf_file, load_pdf_pages
 from image_preprocessing.orientation.page_orientation import (
     PageOrientationDetector,
     correct_image,
+    upright_180_when_osd_abstains,
 )
 from image_preprocessing.orientation.tesseract_osd import (
     MIN_CONFIDENCE as OSD_MIN_CONFIDENCE,
@@ -172,9 +173,20 @@ def _detect_orientation(image: np.ndarray, config: PipelineConfig) -> dict:
         method = "osd"
         osd_confidence = float(osd["confidence"])
     else:
-        orientation = 0.0
-        method = "osd_undecided"
-        osd_confidence = 0.0
+        fallback_180 = upright_180_when_osd_abstains(
+            bgr, analysis_max_dimension=config.analysis_max_dimension
+        )
+        if fallback_180 == 180:
+            orientation = 180.0
+            method = "upright_180_fallback"
+            osd_confidence = 0.0
+            LOGGER.info(
+                "OSD abstained; applying 180° from line-layout scores (upright axis)"
+            )
+        else:
+            orientation = 0.0
+            method = "osd_undecided"
+            osd_confidence = 0.0
 
     tilt = 0.0
     mirrored = False
@@ -303,6 +315,11 @@ def process_page(
             page.document_name,
             page.page_number,
         )
+    elif orient["method"] == "upright_180_fallback":
+        result.rotation_status = "APPLIED"
+        result.add_warning(
+            "OSD abstained; 180° applied from line-layout scores (0 vs 180 only)"
+        )
     elif orientation != 0:
         result.rotation_status = "APPLIED"
     else:
@@ -314,7 +331,9 @@ def process_page(
         result.tilt_status = "NOT_NEEDED"
         result.tilt_angle = 0.0
 
-    apply_osd_rotation = orient["method"] == "osd" and int(orientation) % 360 != 0
+    apply_osd_rotation = orient["method"] in ("osd", "upright_180_fallback") and (
+        int(orientation) % 360 != 0
+    )
     apply_tilt = abs(tilt) >= 1e-4
     needs_correction = apply_osd_rotation or apply_tilt
 

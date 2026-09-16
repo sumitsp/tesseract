@@ -664,6 +664,45 @@ def detect_rotation(
     }
     return int(best_deg), float(conf), bool(ambiguous), diag
 
+
+def upright_180_when_osd_abstains(
+    image: np.ndarray,
+    *,
+    analysis_max_dimension: int = 1800,
+    score_margin: float = 0.08,
+) -> int | None:
+    """Pick 180° correction on the upright axis when OSD returns no answer.
+
+    Does not choose 90/270 (OSD remains authoritative for quarter turns).
+    Used for upside-down forms where Tesseract reports rotate=0 at low confidence.
+    """
+    bundle = preprocess(image, analysis_max_dimension)
+    packed = score_orientation(bundle.ink_clean, bundle.clahe)
+    details = packed.pop("_details")  # type: ignore[misc]
+    scores = {int(k): float(v) for k, v in packed.items()}
+
+    def _evidence(deg: int) -> tuple[int, float]:
+        d = details[str(deg)]
+        return int(d["n_lines"]), float(d["comp"])
+
+    up_lines = max(_evidence(0)[0], _evidence(180)[0])
+    side_lines = max(_evidence(90)[0], _evidence(270)[0])
+    up_comp = max(_evidence(0)[1], _evidence(180)[1])
+    side_comp = max(_evidence(90)[1], _evidence(270)[1])
+    sideways_wins = (
+        side_lines > up_lines + 2
+        and side_comp > up_comp
+        and side_comp >= 0.15
+    )
+    if sideways_wins:
+        return None
+
+    s0, s180 = scores[0], scores[180]
+    if s180 > s0 + score_margin and s180 >= s0 * 1.05:
+        return 180
+    return None
+
+
 def _line_features(ink: np.ndarray) -> dict[str, float]:
     comps = extract_text_components(ink)
     lines = group_text_lines(comps, min_comps=3)
