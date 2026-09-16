@@ -284,17 +284,24 @@ def decide_label(
     """Map P(Handwritten) to (label, confidence).
 
     confidence is the probability of the decided class (Printed or Handwritten).
-    Uncertain is used only near the decision boundary, or when that class
-    probability is below the saved floor.
+    Uncertain only in the narrow band around the threshold when the winning
+    side is still weak — not every page near 0.5 (that flagged clear print).
     """
-    if p_handwritten >= decision_threshold:
-        label = "Handwritten"
-        confidence = float(p_handwritten)
+    p = float(p_handwritten)
+    t = float(decision_threshold)
+    margin = float(uncertain_margin)
+
+    if p >= t + margin:
+        return "Handwritten", round(p, 4)
+    if p <= t - margin:
+        return "Printed", round(1.0 - p, 4)
+
+    # Gray band: pick a side, but abstain if neither side is strong enough.
+    if p >= t:
+        label, confidence = "Handwritten", p
     else:
-        label = "Printed"
-        confidence = float(1.0 - p_handwritten)
-    near_boundary = abs(p_handwritten - decision_threshold) < uncertain_margin
-    if near_boundary or confidence < uncertain_min_confidence:
+        label, confidence = "Printed", 1.0 - p
+    if confidence < uncertain_min_confidence:
         return "Uncertain", round(confidence, 4)
     return label, round(confidence, 4)
 
