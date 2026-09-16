@@ -9,6 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
+@dataclass(frozen=True)
+class BlobSettings:
+    storage_account: str
+    container_name: str
+    prefix: str
+    start_from: str = ""
+
+    @property
+    def prefix_normalized(self) -> str:
+        p = self.prefix.strip()
+        if p and not p.endswith("/"):
+            p += "/"
+        return p
+
 # ---------------------------------------------------------------------------
 # DPI / rasterization
 # ---------------------------------------------------------------------------
@@ -148,6 +163,7 @@ class PipelineConfig:
     excel_filename: str = EXCEL_FILENAME
     recursive: bool = True
     classifier_model_path: Path | None = None
+    blob: BlobSettings | None = None
     extra: dict = field(default_factory=dict)
 
 

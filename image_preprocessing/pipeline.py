@@ -29,12 +29,21 @@ import numpy as np
 
 from image_preprocessing.config import (
     SUPPORTED_EXTENSIONS,
+    BlobSettings,
     PipelineConfig,
     default_config,
 )
 from image_preprocessing.document_type.existing_classifier_adapter import (
     classify_page,
     load_classifier,
+)
+from image_preprocessing.ingest.blob_loader import (
+    connect_container_client,
+    download_blob_bytes,
+    list_chart_folders,
+    list_folder_blobs,
+    list_images_in_folder,
+    load_raster_pages_from_bytes,
 )
 from image_preprocessing.ingest.image_loader import is_raster_file, load_raster_pages
 from image_preprocessing.ingest.output_writer import (
@@ -514,6 +523,103 @@ def run_pipeline(
             )
 
     report_path = layout.report / config.excel_filename
+    write_excel_report(report_path, results, config.quality_review_threshold)
+    LOGGER.info("Wrote %s (%s page rows)", report_path, len(results))
+    return report_path
+
+
+def run_blob_pipeline(
+    output_path: Path | str,
+    config: PipelineConfig | None = None,
+    *,
+    blob_settings: BlobSettings | None = None,
+) -> Path:
+    """Read chart folders from Azure Blob; write corrected PNGs under output/<folder>/."""
+    config = config or default_config()
+    settings = blob_settings or config.blob
+    if settings is None or not settings.storage_account or not settings.container_name:
+        raise ValueError(
+            "Blob settings missing. Set STORAGE_ACCOUNT, CONTAINER_NAME, BLOB_PREFIX "
+            "(and optional START_FROM) in the environment, or pass blob_settings."
+        )
+
+    output_root = Path(output_path)
+    report_layout = OutputLayout(output_root)
+    report_layout.create()
+
+    LOGGER.info(
+        "Azure input: %s/%s/%s",
+        settings.storage_account,
+        settings.container_name,
+        settings.prefix_normalized,
+    )
+    container = connect_container_client(settings)
+    folder_blobs = list_folder_blobs(container, settings)
+    chart_folders = list_chart_folders(
+        folder_blobs, start_from=settings.start_from
+    )
+    if not chart_folders:
+        raise FileNotFoundError(
+            "No chart folders with raster images found under blob prefix."
+        )
+
+    classifier = None
+    try:
+        classifier = load_classifier(config.classifier_model_path)
+    except Exception as exc:
+        LOGGER.warning("Classifier could not be loaded (%s); pages will record ERROR", exc)
+
+    results: list[PageResult] = []
+    doc_index = 0
+    for folder_name in chart_folders:
+        blob_names = list_images_in_folder(folder_blobs, folder_name)
+        if not blob_names:
+            LOGGER.info("Folder %s: no images, skipped", folder_name)
+            continue
+        LOGGER.info("Folder %s: %s image(s)", folder_name, len(blob_names))
+        layout = OutputLayout(output_root, chart_folder=folder_name)
+        layout.corrected_pages.mkdir(parents=True, exist_ok=True)
+
+        for blob_name in blob_names:
+            filename = Path(blob_name).name
+            doc_index += 1
+            LOGGER.info("  Downloading %s", filename)
+            try:
+                data = download_blob_bytes(container, blob_name)
+                pages = load_raster_pages_from_bytes(
+                    data,
+                    document_index=doc_index,
+                    document_name=filename,
+                    input_file=f"{folder_name}/{filename}",
+                    blob_name=blob_name,
+                    chart_folder=folder_name,
+                )
+            except Exception as exc:
+                LOGGER.exception("Failed to load blob %s", blob_name)
+                failed = PageResult(
+                    document_name=filename,
+                    page_number=1,
+                    input_file=f"{folder_name}/{filename}",
+                    input_format=Path(filename).suffix.lower().lstrip("."),
+                    final_status="ERROR",
+                    error_message=str(exc),
+                )
+                failed.add_warning(f"ERROR: {exc}")
+                failed.freeze_warnings()
+                results.append(failed)
+                continue
+
+            for page in pages:
+                LOGGER.info(
+                    "  Processing %s page %s", page.document_name, page.page_number
+                )
+                results.append(
+                    process_page_safe(
+                        page, config, classifier=classifier, layout=layout
+                    )
+                )
+
+    report_path = report_layout.report / config.excel_filename
     write_excel_report(report_path, results, config.quality_review_threshold)
     LOGGER.info("Wrote %s (%s page rows)", report_path, len(results))
     return report_path

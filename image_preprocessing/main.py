@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Preprocess document pages before OCR.
 
-Examples
---------
-    python main.py --input /documents/input.pdf --output /documents/output
-    python main.py --input /documents/input_folder --output /documents/output
-    python main.py --input /documents/input_folder --output /documents/output --debug
-    python main.py --help
+Edit RUN CONFIG below, then:
+
+    python main.py
 """
 
 from __future__ import annotations
@@ -32,40 +29,45 @@ from image_preprocessing.config import (  # noqa: E402
     SKEW_CONFIDENCE_THRESHOLD,
     SUPPORTED_EXTENSIONS,
     TARGET_DPI,
+    BlobSettings,
     PipelineConfig,
     default_config,
 )
+
+# =============================================================================
+# RUN CONFIG — edit these (no .env)
+# =============================================================================
+
+# "local" = file or folder on disk   |   "blob" = Azure chart folders
+INPUT_SOURCE = "local"
+
+# Local input (used when INPUT_SOURCE == "local")
+LOCAL_INPUT = Path(r"C:\Users\sumit.pandey\Downloads\Pg4.tif")
+
+# Where corrected PNGs + Excel report are written
+OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\image_preprocessing\output")
+
+# Azure Blob (used when INPUT_SOURCE == "blob")
+STORAGE_ACCOUNT = "azsadve2aipoc"
+CONTAINER_NAME = "YOUR_CONTAINER_NAME"
+BLOB_PREFIX = "Run1/Batch1/DEID_PNGs/"
+START_FROM = ""
+
+# Optional: full path to handwritten_printed_convnext_tiny.pth (None = default)
+CLASSIFIER_MODEL: Path | None = None
+
+# =============================================================================
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description=(
-            "Production document-page preprocessor for OCR. "
-            "Reads PDF / JPG / PNG / TIFF (and other common document images), "
-            "processes each page sequentially, writes corrected PNG pages and "
-            "an Excel report. Uncertain detections leave the page unchanged."
-        ),
+        description="Document-page preprocessor. Paths and blob settings are in main.py RUN CONFIG.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Pipeline per page (sequential, not a joint optimiser):\n"
-            "  1. Quality / DPI analysis\n"
-            "  2. Standardize DPI (downsample to 400 only; never upscale)\n"
-            "  3. Printed vs handwritten (existing ConvNeXt classifier)\n"
-            "  4. Residual angle (classical) + Tesseract OSD for the quadrant\n"
-            "  5. Mirror detection (after rotation only; OCR-confirmed)\n"
-            "  6. Fine tilt / skew (after rotation + mirror)\n"
-            "  7. Validate; reject corrections that make alignment worse\n"
-            "  8. Save corrected page\n"
-            "  9. Append one Excel row\n\n"
-            "Sign convention: rotation_angle and tilt_angle are the clockwise\n"
-            "offset of content from upright, in degrees. Correction rotates the\n"
-            "image counter-clockwise by that amount (OpenCV positive angle).\n\n"
             f"Supported extensions: {', '.join(sorted(SUPPORTED_EXTENSIONS))}\n"
         ),
     )
-    parser.add_argument("--input", required=True, help="File or directory of documents")
-    parser.add_argument("--output", required=True, help="Output directory (created if needed)")
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -75,21 +77,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-recursive",
         action="store_true",
-        help="When input is a directory, do not recurse into subfolders",
+        help="Local folder only: do not recurse into subfolders",
     )
     parser.add_argument("--target-dpi", type=int, default=TARGET_DPI)
     parser.add_argument(
         "--low-dpi-threshold",
         type=int,
         default=LOW_DPI_WARNING_THRESHOLD,
-        help="DPI below this emits LOW_DPI (pages are never upscaled)",
     )
     parser.add_argument("--max-skew-angle", type=float, default=MAX_SKEW_ANGLE)
     parser.add_argument(
         "--osd-min-confidence",
         type=float,
         default=OSD_MIN_ORIENTATION_CONFIDENCE,
-        help="Legacy; coarse rotation always uses OSD min confidence 1.0 (model-repo)",
     )
     parser.add_argument(
         "--rotation-residual-confidence-threshold",
@@ -110,13 +110,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--quality-threshold",
         type=float,
         default=QUALITY_REVIEW_THRESHOLD,
-        help="Pages below this quality score are marked REVIEW_REQUIRED",
-    )
-    parser.add_argument(
-        "--model",
-        type=Path,
-        default=None,
-        help="Optional path to handwritten_printed_convnext_tiny.pth",
     )
     parser.add_argument(
         "--log-level",
@@ -140,7 +133,17 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
     cfg.mirror_confidence_threshold = float(args.mirror_confidence_threshold)
     cfg.skew_confidence_threshold = float(args.skew_confidence_threshold)
     cfg.quality_review_threshold = float(args.quality_threshold)
-    cfg.classifier_model_path = args.model
+    cfg.classifier_model_path = CLASSIFIER_MODEL
+    source = INPUT_SOURCE.strip().lower()
+    if source == "blob":
+        cfg.blob = BlobSettings(
+            storage_account=STORAGE_ACCOUNT.strip(),
+            container_name=CONTAINER_NAME.strip(),
+            prefix=BLOB_PREFIX.strip(),
+            start_from=START_FROM.strip(),
+        )
+    elif source != "local":
+        raise ValueError(f'INPUT_SOURCE must be "local" or "blob", got: {INPUT_SOURCE!r}')
     return cfg
 
 
@@ -155,9 +158,7 @@ def _check_tesseract_runtime() -> bool:
     except ImportError:
         print(
             f"ERROR: pytesseract is not installed for this Python:\n  {sys.executable}\n"
-            "Install and run with the project venv, e.g.:\n"
-            "  .\\venv\\Scripts\\python.exe -m pip install -r requirements.txt\n"
-            "  .\\venv\\Scripts\\python.exe main.py --input ... --output ...",
+            "  .\\venv\\Scripts\\python.exe -m pip install -r requirements.txt",
             file=sys.stderr,
         )
         return False
@@ -180,21 +181,36 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    output = Path(args.output).expanduser().resolve()
+    output = Path(OUTPUT_DIR).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(output / "preprocessing.log", encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     logging.getLogger().addHandler(file_handler)
 
     cfg = config_from_args(args)
     if not _check_tesseract_runtime():
         return 1
 
-    from image_preprocessing.pipeline import run_pipeline
+    from image_preprocessing.pipeline import run_blob_pipeline, run_pipeline
 
-    report = run_pipeline(Path(args.input), output, cfg)
-    print(f"Report: {report}")
-    print(f"Corrected pages: {output / 'corrected_pages'}")
+    source = INPUT_SOURCE.strip().lower()
+    if source == "blob":
+        if not cfg.blob or not cfg.blob.storage_account or not cfg.blob.container_name:
+            print("ERROR: Set STORAGE_ACCOUNT and CONTAINER_NAME in main.py RUN CONFIG.", file=sys.stderr)
+            return 1
+        report = run_blob_pipeline(output, cfg)
+        print(f"Report: {report}")
+        print(f"Corrected pages: {output} (one subfolder per chart)")
+    else:
+        input_path = Path(LOCAL_INPUT).expanduser().resolve()
+        if not input_path.exists():
+            print(f"ERROR: LOCAL_INPUT does not exist: {input_path}", file=sys.stderr)
+            return 1
+        report = run_pipeline(input_path, output, cfg)
+        print(f"Report: {report}")
+        print(f"Corrected pages: {output / 'corrected_pages'}")
     return 0
 
 

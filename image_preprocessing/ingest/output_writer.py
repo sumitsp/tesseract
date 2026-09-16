@@ -9,11 +9,17 @@ from image_preprocessing.utils.image_utils import save_png
 
 
 class OutputLayout:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, chart_folder: str | None = None) -> None:
         self.root = Path(root)
-        self.corrected_pages = self.root / "corrected_pages"
+        self.chart_folder = chart_folder
+        if chart_folder:
+            self.corrected_pages = self.root / chart_folder
+        else:
+            self.corrected_pages = self.root / "corrected_pages"
         self.report = self.root / "report"
-        self.debug = self.root / "debug"
+        self.debug = (
+            self.root / "debug" / chart_folder if chart_folder else self.root / "debug"
+        )
 
     def create(self) -> None:
         self.corrected_pages.mkdir(parents=True, exist_ok=True)
@@ -29,6 +35,15 @@ class OutputLayout:
 
 def corrected_page_filename(page: LoadedPage) -> str:
     stem = _safe_stem(page.document_name)
+    if page.extras.get("chart_folder"):
+        multi_page = (
+            page.input_format.lower() in {"tif", "tiff"}
+            or int(page.extras.get("frame_count", 1) or 1) > 1
+            or page.page_number > 1
+        )
+        if multi_page:
+            return f"{stem}_page_{page.page_number:03d}.png"
+        return f"{stem}.png"
     multi_page = (
         page.input_format.lower() in {"pdf", "tif", "tiff"}
         or int(page.extras.get("frame_count", 1) or 1) > 1
