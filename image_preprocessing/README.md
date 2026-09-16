@@ -19,7 +19,7 @@ cd image_preprocessing
 python -m pip install -r requirements.txt
 ```
 
-Tesseract must be installed on the system (OSD is used only to resolve the 180° ambiguity after classical geometry finds the text-line angle). Without the `tesseract` binary, the pipeline still runs, but rotation is marked `UNCERTAIN` rather than guessing 0° vs 180°. The handwritten/printed classifier is the existing ConvNeXt-Tiny model under `document_type/` — it is not retrained here.
+Tesseract must be installed on the system. Coarse rotation is Tesseract OSD only (0/90/180/270). If OSD cannot decide, the page is left unrotated — geometric rotation is not used as a fallback. The handwritten/printed classifier is the existing ConvNeXt-Tiny model under `document_type/` — it is not retrained here.
 
 ## Run
 
@@ -34,12 +34,11 @@ python main.py --help
 1. Quality / DPI analysis  
 2. Standardize DPI (downsample to 400 only; **never upscale**)  
 3. Printed vs handwritten (existing `hw_printed.py`)  
-4. Arbitrary rotation (classical CV) + Tesseract OSD for 180° only  
-5. Mirror detection (after rotation)  
-6. Fine tilt / skew ±10° (after rotation + mirror)  
-7. Validate; reject worse geometry  
-8. Save PNG  
-9. Excel row  
+4. Coarse rotation from Tesseract OSD only (no geometric fallback)  
+5. Mirror is measured and recorded, never flipped  
+6. Fine tilt from the geometric detector, then applied  
+7. Save PNG  
+8. Excel row  
 
 ## Layout
 
@@ -59,4 +58,6 @@ image_preprocessing/
 
 ## Sign convention
 
-`rotation_angle` and `tilt_angle` are the **clockwise offset of content from upright**, in degrees. Correction rotates the image **counter-clockwise** by that amount (OpenCV positive angle). Example: content at 120° clockwise → `rotation_angle = 120.4`.
+`rotation_angle` is the **clockwise OSD correction applied** (0 / 90 / 180 / 270), the same number model-repo stores as `rotation_deg`. If OSD cannot decide, the page is left unrotated.
+
+`tilt_angle` is the geometric residual, **positive = clockwise**. It is applied after rotation. Mirror is a YES/NO flag only; the page is never flipped.

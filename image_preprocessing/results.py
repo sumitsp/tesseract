@@ -60,14 +60,13 @@ class PageResult:
     document_type_method: str | None = None
     document_type_p_handwritten: float | None = None
 
-    rotation_angle: float | None = None  # clockwise offset of content from upright
+    rotation_angle: float | None = None  # clockwise OSD correction applied (0/90/180/270)
     rotation_confidence: float | None = None
     rotation_status: str | None = None  # APPLIED | NOT_NEEDED | REJECTED | UNCERTAIN
     rotation_residual_deg: float | None = None
-    """Stage 4A: measured off-axis angle in [-45, 45), reported even when the
-    quadrant could not be resolved, so a reviewer can see what was measured."""
+    """Unused. Fine tilt is reported in ``tilt_angle``."""
     rotation_quadrant_deg: int | None = None
-    """Stage 4B: quadrant from OSD, or blank when OSD would not commit."""
+    """OSD clockwise correction, or blank when OSD would not commit."""
 
     mirror: str | None = None  # YES | NO | UNKNOWN
     mirror_confidence: float | None = None

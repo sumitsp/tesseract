@@ -50,10 +50,8 @@ ROTATION_RESIDUAL_CONFIDENCE_THRESHOLD = 0.45
 
 # Tesseract OSD decides the quadrant (0/90/180/270) and nothing else. This is
 # the raw open-ended ``orientation_conf`` scale, not a 0-1 probability.
-# Calibrated over 500 page/angle combinations; see orientation/osd_direction.py
-# for the full table. 1.0 (the value used by the sibling model-repo project)
-# admits 23 wrong quadrants; 5.0 admits none at 62% coverage.
-OSD_MIN_ORIENTATION_CONFIDENCE = 5.0
+# 1.0 matches model-repo: below this, leave the page unrotated.
+OSD_MIN_ORIENTATION_CONFIDENCE = 1.0
 
 # ---------------------------------------------------------------------------
 # Mirror

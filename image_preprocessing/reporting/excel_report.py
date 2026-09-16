@@ -215,7 +215,7 @@ def _write_summary_sheet(ws: Worksheet, results: list[PageResult], quality_thres
                 lambda r: r.rotation_angle is not None and abs(float(r.rotation_angle)) >= 0.2,
             ),
         ),
-        ("Mirrored pages", _count(results, lambda r: r.mirror_corrected == "YES")),
+        ("Pages flagged mirrored (not flipped)", _count(results, lambda r: r.mirror == "YES")),
         (
             "Deskewed pages",
             _count(results, lambda r: r.tilt_status == "APPLIED"),

@@ -6,16 +6,14 @@ Order (do not fold these into one optimiser):
       → 1 quality / DPI analysis
       → 2 standardize DPI
       → 3 printed vs handwritten  (existing ConvNeXt classifier)
-      → 4 arbitrary rotation detection + OSD quadrant resolution, jointly
-          with an OSD-based mirror verdict (see osd_direction.py)
-      → 5 mirror: trust OSD's "not mirrored"; require the independent
-          structural+OCR check to agree before acting on "mirrored"
-      → 6 fine tilt / skew
-      → 7 final validation
-      → 8 save corrected page
-      → 9 Excel row
+      → 4 coarse rotation from Tesseract OSD only (no geometric fallback)
+      → 5 mirror measured, never applied
+      → 6 fine tilt from the geometric detector, then applied
+      → 7 save corrected page
+      → 8 Excel row
 
-A detector that is not confident abstains. A failed page does not stop the job.
+Correction order matches model-repo: OSD rotation, then tilt, never a flip.
+A failed page does not stop the job.
 """
 
 from __future__ import annotations
@@ -43,29 +41,19 @@ from image_preprocessing.ingest.output_writer import (
     write_corrected_page,
 )
 from image_preprocessing.ingest.pdf_loader import is_pdf_file, load_pdf_pages
-from image_preprocessing.orientation.arbitrary_rotation import (
-    detect_rotation,
-    overlay_ink,
+from image_preprocessing.orientation.page_orientation import (
+    PageOrientationDetector,
+    correct_image,
 )
-from image_preprocessing.orientation.angle_search import horizontal_axis_confidence
-from image_preprocessing.orientation.mirror_detector import detect_mirror
-from image_preprocessing.orientation.skew_detector import detect_skew
+from image_preprocessing.orientation.tesseract_osd import detect_rotation as osd_rotation
 from image_preprocessing.quality.quality_analyzer import analyze_quality
 from image_preprocessing.reporting.excel_report import write_excel_report
 from image_preprocessing.results import LoadedPage, PageResult
 from image_preprocessing.utils.image_utils import (
-    INTER_FINAL,
     downsample_to_dpi,
     ensure_bgr,
-    flip_horizontal,
     resize_max_dimension,
-    rotate_bound,
-    rotate_lossless_ccw,
     save_png,
-)
-from image_preprocessing.validation.correction_validator import (
-    content_not_cropped,
-    validate_candidate,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -168,19 +156,43 @@ def _annotate(image: np.ndarray, text: str) -> np.ndarray:
     return vis
 
 
-def _apply_rotation(image: np.ndarray, rot) -> np.ndarray:
-    """Correct ``rot`` with exactly one resampling pass, or none at all.
+def _detect_orientation(image: np.ndarray, config: PipelineConfig) -> dict:
+    """OSD coarse rotation, geometric tilt, recorded mirror. Never geometric rotation."""
+    try:
+        detected = PageOrientationDetector().detect(image)
+    except Exception as exc:
+        LOGGER.warning("Orientation detect fallback: %s", exc)
+        return {
+            "orientation_angle": 0.0,
+            "tilt_angle": 0.0,
+            "mirrored": False,
+            "method": "fallback",
+            "osd_confidence": 0.0,
+            "tilt_confidence": None,
+            "mirror_confidence": None,
+        }
 
-    The quadrant turn goes through ``cv2.rotate`` (a transpose and flip, exactly
-    lossless), so a page that is only a quarter or half turn out costs no
-    interpolation whatsoever. Only a genuine off-axis residual triggers a warp,
-    and then just once, on an expanded canvas so nothing is cropped.
-    """
-    out = rotate_lossless_ccw(image, int(rot.quadrant_deg or 0))
-    residual = float(rot.residual_component_deg or 0.0)
-    if abs(residual) > 0.05:
-        out = rotate_bound(out, residual, interpolation=INTER_FINAL)
-    return out
+    tilt = float(detected.get("tilt") or detected.get("tilt_angle") or 0)
+    mirrored = bool(detected.get("mirror") or detected.get("mirrored") or False)
+    osd = osd_rotation(image, min_confidence=config.osd_min_orientation_confidence)
+    if osd is not None:
+        orientation = float(osd["rotation"])
+        method = "osd"
+        osd_confidence = float(osd["confidence"])
+    else:
+        orientation = 0.0
+        method = "osd_undecided"
+        osd_confidence = 0.0
+
+    return {
+        "orientation_angle": orientation,
+        "tilt_angle": tilt,
+        "mirrored": mirrored,
+        "method": method,
+        "osd_confidence": osd_confidence,
+        "tilt_confidence": detected.get("tilt_confidence"),
+        "mirror_confidence": detected.get("mirror_confidence"),
+    }
 
 
 def process_page(
@@ -255,233 +267,80 @@ def process_page(
         result.add_warning(f"Document type error: {dtype.error}")
 
     rotation_applied = 0.0
-    mirror_applied = False
     tilt_applied = 0.0
 
-    # 4. Rotation: residual sweep (4A) then OSD quadrant (4B)
-    rotation_debug: dict = {}
-    rot = detect_rotation(working, config, debug=rotation_debug)
-    result.rotation_confidence = rot.confidence
-    result.rotation_residual_deg = rot.residual_deg
-    result.rotation_quadrant_deg = rot.quadrant_deg
-    if rot.warning:
-        result.add_warning(rot.warning)
-    if debug_dir is not None and "ink" in rotation_debug:
-        _save_debug(
-            debug_dir,
-            "text_components.png",
-            overlay_ink(
-                _analysis_copy(working, config),
-                rotation_debug["ink"],
-                f"residual={rot.residual_deg} quadrant={rot.quadrant_deg}",
-            ),
-        )
+    # 4-6. Same contract as model-repo quality_rotation_hw:
+    # coarse rotation is Tesseract OSD only; geometric rotation is not a fallback.
+    # Tilt comes from PageOrientationDetector and is applied.
+    # Mirror is recorded and never flipped.
+    orient = _detect_orientation(working, config)
+    orientation = float(orient["orientation_angle"])
+    tilt = float(orient["tilt_angle"])
+    mirrored = bool(orient["mirrored"])
+    result.rotation_angle = round(orientation, 2)
+    result.rotation_confidence = orient["osd_confidence"] or None
+    result.rotation_quadrant_deg = int(orientation) % 360 if orient["method"] == "osd" else None
+    result.mirror = "YES" if mirrored else "NO"
+    result.mirror_confidence = orient["mirror_confidence"]
+    result.mirror_corrected = "NO"
+    result.tilt_angle = round(tilt, 2)
+    result.tilt_confidence = orient["tilt_confidence"]
 
-    # Mirror needs a confirmed readable direction. Fine tilt only needs the
-    # horizontal axis: 0 and 180 degrees have identical line skew.
-    orientation_confirmed = False
-
-    if rot.status == "UNCERTAIN":
-        result.rotation_angle = None
+    if orient["method"] == "osd_undecided":
         result.rotation_status = "UNCERTAIN"
-    elif rot.status == "NOT_NEEDED":
-        result.rotation_angle = 0.0
+        result.add_warning("OSD could not determine orientation; page left unrotated")
+    elif orientation != 0:
+        result.rotation_status = "APPLIED"
+    else:
         result.rotation_status = "NOT_NEEDED"
-        orientation_confirmed = True
-    else:
-        candidate = _apply_rotation(working, rot)
-        validation = validate_candidate(working, candidate, config)
-        if validation.accepted:
-            working = candidate
-            rotation_applied = float(rot.angle_cw_deg or 0.0)
-            result.rotation_angle = round(rotation_applied, 2)
-            result.rotation_status = "APPLIED"
-            orientation_confirmed = True
-        else:
-            result.rotation_angle = None
-            result.rotation_status = "REJECTED"
-            result.add_warning(
-                f"Rotation rejected by validation ({validation.reason}); page preserved"
-            )
 
-    axis_confidence = horizontal_axis_confidence(
-        working, config.analysis_max_dimension
-    )
-    horizontal_axis_confirmed = (
-        orientation_confirmed
-        or axis_confidence >= config.tilt_horizontal_axis_confidence
-    )
-
-    if debug_dir is not None:
-        _save_debug(
-            debug_dir,
-            "rotation_result.png",
-            _annotate(
-                _analysis_copy(working, config),
-                f"rot={result.rotation_angle} {result.rotation_status}",
-            ),
-        )
-
-    # 5. Mirror — upright page only, and biased hard towards leaving it alone
-    #
-    # The OSD pass that resolved the quadrant (stage 4B) already answers this:
-    # mirrored glyphs are not valid character shapes, so OSD's confidence
-    # collapses on a mirrored page and recovers once it is read flipped (see
-    # osd_direction.detect_quadrant_and_mirror). That is a stronger, purely
-    # OSD-grounded signal than the structural line-geometry heuristic below,
-    # and — critically — it does not require the quadrant to already be
-    # resolved by some other means, so it does not deadlock on a page that is
-    # mirrored AND sideways the way an OSD-after-mirror-confirmed ordering
-    # would. When OSD did resolve a verdict, trust "not mirrored" outright
-    # (leaving a page alone is never destructive), but require the
-    # independent structural + OCR check to also agree before acting on
-    # "mirrored" — flipping a good page is severely destructive, so the one
-    # irreversible branch gets two independent opinions, not one.
-    if orientation_confirmed and rot.mirror_from_osd is False:
-        result.mirror = "NO"
-        result.mirror_confidence = rot.confidence
-        result.mirror_corrected = "NO"
-    elif orientation_confirmed and rot.mirror_from_osd is True:
-        # The structural confirmation below assumes near-horizontal text
-        # lines to measure left/right edge alignment. A residual tilt is
-        # deliberately deferred to stage 6 (not yet applied to ``working``),
-        # so on a tilted page it corrupts that measurement -- e.g. an 8
-        # degree residual alone was enough to hide a genuine mirror from the
-        # structural check entirely. Deskew a scratch copy for this
-        # confirmation only; the real tilt correction still happens once, on
-        # validated pixels, at stage 6.
-        pre_skew = detect_skew(working, config)
-        if pre_skew.tilt_cw_deg:
-            confirm_input = rotate_bound(
-                working, float(pre_skew.tilt_cw_deg), interpolation=INTER_FINAL
-            )
-        else:
-            confirm_input = working
-        confirm = detect_mirror(confirm_input, config)
-        if confirm.corrected:
-            candidate = flip_horizontal(working)
-            validation = validate_candidate(working, candidate, config)
-            if validation.accepted:
-                working = candidate
-                mirror_applied = True
-                result.mirror = "YES"
-                result.mirror_confidence = min(rot.confidence, confirm.confidence)
-                result.mirror_corrected = "YES"
-            else:
-                result.mirror = "UNKNOWN"
-                result.mirror_confidence = confirm.confidence
-                result.mirror_corrected = "NO"
-                result.add_warning("Mirror rejected by validation; page not flipped")
-        else:
-            result.mirror = "UNKNOWN"
-            result.mirror_confidence = confirm.confidence
-            result.mirror_corrected = "NO"
-            result.add_warning(
-                "OSD suspected the page was mirrored but the structural check "
-                "disagreed; page left unflipped for review"
-            )
-    elif orientation_confirmed:
-        # rot.mirror_from_osd is None here only when OSD never ran at all
-        # (residual sweep itself found nothing, so quadrant detection was
-        # skipped) yet the page was still NOT_NEEDED/APPLIED some other way;
-        # this should not happen in practice, but the pure structural check
-        # is a safe fallback rather than an unreachable-code assumption.
-        mirror = detect_mirror(working, config)
-        result.mirror = mirror.mirror
-        result.mirror_confidence = mirror.confidence
-        result.mirror_corrected = "NO"
-        if mirror.warning:
-            result.add_warning(mirror.warning)
-        if mirror.corrected:
-            candidate = flip_horizontal(working)
-            validation = validate_candidate(working, candidate, config)
-            if validation.accepted:
-                working = candidate
-                mirror_applied = True
-                result.mirror_corrected = "YES"
-            else:
-                result.mirror = "UNKNOWN"
-                result.add_warning("Mirror rejected by validation; page not flipped")
-    else:
-        result.mirror = "UNKNOWN"
-        result.mirror_corrected = "NO"
-        result.mirror_confidence = None
-
-    if debug_dir is not None:
-        _save_debug(
-            debug_dir,
-            "mirror_result.png",
-            _annotate(
-                _analysis_copy(working, config),
-                f"mirror={result.mirror} corrected={result.mirror_corrected}",
-            ),
-        )
-
-    # 6. Fine tilt / skew
-    skew = detect_skew(working, config)
-    result.tilt_confidence = skew.confidence
-    if skew.warning:
-        result.add_warning(skew.warning)
-
-    if not horizontal_axis_confirmed:
-        # A sideways page must not receive a small-angle correction. Report the
-        # measurement, but keep the pixels unchanged.
-        result.tilt_angle = skew.tilt_cw_deg
-        result.tilt_status = "NOT_APPLIED"
-        result.add_warning(
-            "Tilt not applied: horizontal text axis was not confirmed"
-        )
-    elif skew.status == "UNCERTAIN":
-        result.tilt_angle = None
-        result.tilt_status = "UNCERTAIN"
-    elif skew.status == "NOT_NEEDED":
-        result.tilt_angle = 0.0
+    if orient["method"] == "fallback":
+        result.rotation_status = "UNCERTAIN"
         result.tilt_status = "NOT_NEEDED"
+        result.add_warning("Orientation detection failed; page left unchanged")
+    elif abs(tilt) >= 1e-4:
+        result.tilt_status = "APPLIED"
     else:
-        candidate = rotate_bound(working, float(skew.tilt_cw_deg), interpolation=INTER_FINAL)
-        validation = validate_candidate(working, candidate, config)
-        if validation.accepted:
-            working = candidate
-            tilt_applied = float(skew.tilt_cw_deg)
-            result.tilt_angle = round(tilt_applied, 2)
-            result.tilt_status = "APPLIED"
-        else:
-            result.tilt_angle = None
-            result.tilt_status = "REJECTED"
-            result.add_warning("Tilt rejected by validation; page preserved")
+        result.tilt_status = "NOT_NEEDED"
+        result.tilt_angle = 0.0
 
-    if debug_dir is not None:
-        _save_debug(
-            debug_dir,
-            "skew_result.png",
-            _annotate(
-                _analysis_copy(working, config),
-                f"tilt={result.tilt_angle} {result.tilt_status}",
-            ),
-        )
-
-    # 7. Final validation of the composed high-res result vs pre-geometry image
-    if working is not original_working:
-        final_val = validate_candidate(original_working, working, config)
-        cropped_ok = content_not_cropped(original_working.shape, working.shape)
-        if (not final_val.accepted) or (not cropped_ok):
+    needs_correction = orientation != 0 or abs(tilt) >= 1e-4
+    if needs_correction and orient["method"] != "fallback":
+        try:
+            working = correct_image(
+                working,
+                {
+                    "rotation": int(orientation) % 360,
+                    "tilt": tilt,
+                    "mirror": False,
+                },
+            )
+            rotation_applied = orientation
+            tilt_applied = tilt
+        except Exception as exc:
             LOGGER.warning(
-                "Final validation rejected corrections for %s page %s (%s)",
+                "Orientation correction failed for %s page %s: %s",
                 page.document_name,
                 page.page_number,
-                final_val.reason if not final_val.accepted else "cropped",
+                exc,
             )
             working = original_working
-            result.rotation_angle = None if rotation_applied else result.rotation_angle
-            result.rotation_status = "REJECTED" if rotation_applied else result.rotation_status
-            result.mirror = "UNKNOWN" if mirror_applied else result.mirror
-            result.mirror_corrected = "NO"
-            result.tilt_angle = None if tilt_applied else result.tilt_angle
-            result.tilt_status = "REJECTED" if tilt_applied else result.tilt_status
-            result.add_warning("Final validation rejected corrections; original preserved")
-            rotation_applied = 0.0
-            mirror_applied = False
-            tilt_applied = 0.0
+            result.rotation_status = "REJECTED" if orientation else result.rotation_status
+            result.tilt_status = "REJECTED" if abs(tilt) >= 1e-4 else result.tilt_status
+            result.add_warning("Orientation correction failed; original preserved")
+
+    result.width_px = int(working.shape[1])
+    result.height_px = int(working.shape[0])
+
+    if debug_dir is not None:
+        _save_debug(
+            debug_dir,
+            "orientation_result.png",
+            _annotate(
+                _analysis_copy(working, config),
+                f"rot={result.rotation_angle} {result.rotation_status} tilt={result.tilt_angle} mirror={result.mirror}",
+            ),
+        )
 
     if debug_dir is not None:
         _save_debug(debug_dir, "final.png", working)
@@ -497,7 +356,7 @@ def process_page(
         or result.document_type in {"UNCERTAIN", "ERROR"}
         or (result.quality_score is not None and result.quality_score < config.quality_review_threshold)
     )
-    changed = abs(rotation_applied) >= 0.2 or mirror_applied or abs(tilt_applied) >= 0.2
+    changed = abs(rotation_applied) >= 0.2 or abs(tilt_applied) >= 0.2
     if uncertain:
         result.final_status = "REVIEW_REQUIRED"
     elif changed:
