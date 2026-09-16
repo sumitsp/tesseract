@@ -145,6 +145,11 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
 
 
 def _check_tesseract_runtime() -> bool:
+    from image_preprocessing.utils.tesseract_config import (
+        configure_tesseract,
+        tesseract_help_message,
+    )
+
     try:
         import pytesseract
     except ImportError:
@@ -156,16 +161,14 @@ def _check_tesseract_runtime() -> bool:
             file=sys.stderr,
         )
         return False
+    found = configure_tesseract()
     try:
         pytesseract.get_tesseract_version()
     except Exception as exc:
-        print(
-            "ERROR: Tesseract OCR binary not found on PATH "
-            f"(pytesseract error: {exc}).\n"
-            "Install Tesseract for Windows and add it to PATH, then run:\n"
-            "  tesseract --list-langs   (must include 'osd')",
-            file=sys.stderr,
-        )
+        print(f"ERROR: Tesseract OCR binary not found ({exc}).\n", file=sys.stderr)
+        if found:
+            print(f"  Tried: {found}", file=sys.stderr)
+        print(tesseract_help_message(), file=sys.stderr)
         return False
     return True
 

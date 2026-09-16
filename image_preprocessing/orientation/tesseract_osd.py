@@ -47,6 +47,10 @@ def _run_osd(rgb: np.ndarray) -> Optional[dict[str, Any]]:
     try:
         import pytesseract
         from pytesseract import Output
+
+        from image_preprocessing.utils.tesseract_config import configure_tesseract
+
+        configure_tesseract()
     except ImportError as exc:
         logger.warning("OSD unavailable (pytesseract): %s", exc)
         return None

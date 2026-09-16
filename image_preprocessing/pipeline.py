@@ -287,7 +287,10 @@ def process_page(
     result.document_type_method = dtype.method
     result.document_type_p_handwritten = dtype.p_handwritten
     if dtype.document_type == "UNCERTAIN":
-        result.add_warning("Document type uncertain")
+        if dtype.method == "blank_page":
+            result.add_warning("Document type skipped: page appears blank (too little ink)")
+        else:
+            result.add_warning("Document type uncertain")
     if dtype.error:
         result.add_warning(f"Document type error: {dtype.error}")
 

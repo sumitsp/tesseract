@@ -15,10 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 
 from image_preprocessing.document_type import hw_printed
-from image_preprocessing.utils.image_utils import encode_png_bytes
+from image_preprocessing.utils.image_utils import encode_png_bytes, to_gray
+
+# Below this fraction of dark pixels, the page is treated as blank for HW/printed.
+# The ConvNeXt model was not trained on empty sheets and tends to say "Printed".
+MIN_INK_RATIO_FOR_CLASSIFICATION = 0.004
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,9 +54,27 @@ def load_classifier(model_path: Path | None = None) -> Any:
     return hw_printed.load_model(path)
 
 
+def _ink_ratio(image: np.ndarray) -> float:
+    gray = to_gray(image)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thr = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ink = float(np.mean(thr == 0))
+    if thr.mean() < 127:
+        ink = 1.0 - ink
+    return ink
+
+
 def classify_page(image: np.ndarray, model: Any | None = None) -> DocumentTypeResult:
     """Classify one page. Never raises — errors become document_type=ERROR."""
     try:
+        if _ink_ratio(image) < MIN_INK_RATIO_FOR_CLASSIFICATION:
+            return DocumentTypeResult(
+                document_type="UNCERTAIN",
+                confidence=0.0,
+                method="blank_page",
+                p_handwritten=None,
+                raw_label="Uncertain",
+            )
         image_bytes = encode_png_bytes(image)
         label, confidence, method = hw_printed.classify_image_type(image_bytes, model=model)
         mapped = _LABEL_MAP.get(label, label.upper() if label else "UNCERTAIN")
