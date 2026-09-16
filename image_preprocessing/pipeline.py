@@ -6,8 +6,10 @@ Order (do not fold these into one optimiser):
       → 1 quality / DPI analysis
       → 2 standardize DPI
       → 3 printed vs handwritten  (existing ConvNeXt classifier)
-      → 4 arbitrary rotation detection + OSD 180° resolution
-      → 5 mirror detection
+      → 4 arbitrary rotation detection + OSD quadrant resolution, jointly
+          with an OSD-based mirror verdict (see osd_direction.py)
+      → 5 mirror: trust OSD's "not mirrored"; require the independent
+          structural+OCR check to agree before acting on "mirrored"
       → 6 fine tilt / skew
       → 7 final validation
       → 8 save corrected page
@@ -321,7 +323,69 @@ def process_page(
         )
 
     # 5. Mirror — upright page only, and biased hard towards leaving it alone
-    if orientation_confirmed:
+    #
+    # The OSD pass that resolved the quadrant (stage 4B) already answers this:
+    # mirrored glyphs are not valid character shapes, so OSD's confidence
+    # collapses on a mirrored page and recovers once it is read flipped (see
+    # osd_direction.detect_quadrant_and_mirror). That is a stronger, purely
+    # OSD-grounded signal than the structural line-geometry heuristic below,
+    # and — critically — it does not require the quadrant to already be
+    # resolved by some other means, so it does not deadlock on a page that is
+    # mirrored AND sideways the way an OSD-after-mirror-confirmed ordering
+    # would. When OSD did resolve a verdict, trust "not mirrored" outright
+    # (leaving a page alone is never destructive), but require the
+    # independent structural + OCR check to also agree before acting on
+    # "mirrored" — flipping a good page is severely destructive, so the one
+    # irreversible branch gets two independent opinions, not one.
+    if orientation_confirmed and rot.mirror_from_osd is False:
+        result.mirror = "NO"
+        result.mirror_confidence = rot.confidence
+        result.mirror_corrected = "NO"
+    elif orientation_confirmed and rot.mirror_from_osd is True:
+        # The structural confirmation below assumes near-horizontal text
+        # lines to measure left/right edge alignment. A residual tilt is
+        # deliberately deferred to stage 6 (not yet applied to ``working``),
+        # so on a tilted page it corrupts that measurement -- e.g. an 8
+        # degree residual alone was enough to hide a genuine mirror from the
+        # structural check entirely. Deskew a scratch copy for this
+        # confirmation only; the real tilt correction still happens once, on
+        # validated pixels, at stage 6.
+        pre_skew = detect_skew(working, config)
+        if pre_skew.tilt_cw_deg:
+            confirm_input = rotate_bound(
+                working, float(pre_skew.tilt_cw_deg), interpolation=INTER_FINAL
+            )
+        else:
+            confirm_input = working
+        confirm = detect_mirror(confirm_input, config)
+        if confirm.corrected:
+            candidate = flip_horizontal(working)
+            validation = validate_candidate(working, candidate, config)
+            if validation.accepted:
+                working = candidate
+                mirror_applied = True
+                result.mirror = "YES"
+                result.mirror_confidence = min(rot.confidence, confirm.confidence)
+                result.mirror_corrected = "YES"
+            else:
+                result.mirror = "UNKNOWN"
+                result.mirror_confidence = confirm.confidence
+                result.mirror_corrected = "NO"
+                result.add_warning("Mirror rejected by validation; page not flipped")
+        else:
+            result.mirror = "UNKNOWN"
+            result.mirror_confidence = confirm.confidence
+            result.mirror_corrected = "NO"
+            result.add_warning(
+                "OSD suspected the page was mirrored but the structural check "
+                "disagreed; page left unflipped for review"
+            )
+    elif orientation_confirmed:
+        # rot.mirror_from_osd is None here only when OSD never ran at all
+        # (residual sweep itself found nothing, so quadrant detection was
+        # skipped) yet the page was still NOT_NEEDED/APPLIED some other way;
+        # this should not happen in practice, but the pure structural check
+        # is a safe fallback rather than an unreachable-code assumption.
         mirror = detect_mirror(working, config)
         result.mirror = mirror.mirror
         result.mirror_confidence = mirror.confidence

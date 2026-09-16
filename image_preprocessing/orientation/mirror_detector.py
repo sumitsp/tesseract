@@ -4,6 +4,20 @@ Runs on a page that is already upright, because every cue used here is defined
 on upright left-to-right geometry: a quarter-turned page has no meaningful "left
 margin", and rotation and horizontal flip do not commute for 90/270.
 
+Two roles, not one
+-------------------
+The primary mirror verdict now comes from stage 4B's OSD-based check (see
+``osd_direction.detect_quadrant_and_mirror``), which resolves quadrant and
+mirror together and is what actually catches most mirrored pages. This
+module has two remaining jobs, both driven from ``pipeline.py``:
+
+  * When OSD is confident the page is mirrored, ``detect_mirror`` here is the
+    required second opinion before anything is actually flipped — flipping a
+    good page is severely destructive, so that one irreversible action needs
+    two independent signals to agree, not one.
+  * When OSD could not resolve a quadrant at all (and so has no mirror
+    opinion either), this module is the sole fallback detector.
+
 Why this stage is built to say NO
 ---------------------------------
 Mirrored pages are rare and flipping a good page is severely destructive, so the

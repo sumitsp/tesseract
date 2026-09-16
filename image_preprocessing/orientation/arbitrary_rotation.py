@@ -1,9 +1,21 @@
 """Stage 4 — arbitrary page rotation, in two independent sub-stages.
 
     4A  residual off-axis angle, in [-45, 45)   -- projection profile, classical
-    4B  which quadrant of the remaining 4       -- Tesseract OSD (osd_direction)
+    4B  which quadrant of the remaining 4, AND
+        whether the page is mirrored            -- Tesseract OSD (osd_direction)
 
     rotation_angle = residual + quadrant        (clockwise offset of content)
+
+Why 4B also resolves mirror
+----------------------------
+Mirrored Latin glyphs are not valid character shapes, so OSD's confidence on
+a mirrored page collapses regardless of which quadrant is tried. An earlier
+design ran mirror detection as its own stage 5, gated on the quadrant already
+being resolved -- which deadlocked on every mirrored page, since OSD could
+never resolve the quadrant of a mirrored page in the first place. 4B now
+runs OSD on the image and on its horizontal flip and keeps whichever answer
+is actually confident, which resolves quadrant and mirror together and
+removes that deadlock. See ``osd_direction.detect_quadrant_and_mirror``.
 
 Why this order, and not the other way round
 -------------------------------------------
@@ -46,7 +58,10 @@ from image_preprocessing.orientation.angle_search import (
     text_ink,
     wrap_pm90,
 )
-from image_preprocessing.orientation.osd_direction import QuadrantResult, detect_quadrant
+from image_preprocessing.orientation.osd_direction import (
+    QuadrantMirrorResult,
+    detect_quadrant_and_mirror,
+)
 from image_preprocessing.utils.image_utils import ensure_bgr, rotate_bound
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +77,10 @@ class RotationResult:
     residual_deg: float | None
     """Off-axis residual as measured, in [-45, 45), whether or not it is used."""
     quadrant_deg: int | None
+    mirror_from_osd: bool | None = None
+    """Mirror verdict from the same OSD pass that resolved ``quadrant_deg``
+    (see ``osd_direction.detect_quadrant_and_mirror``). None only when the
+    quadrant itself was not resolved."""
     residual_component_deg: float = 0.0
     """The part of ``residual_deg`` folded into ``angle_cw_deg``. Zero when the
     residual was small enough to leave to the tilt stage, or not trustworthy.
@@ -163,12 +182,13 @@ def detect_rotation(
     if debug is not None:
         debug["aligned"] = aligned
 
-    quad: QuadrantResult = detect_quadrant(
+    quad: QuadrantMirrorResult = detect_quadrant_and_mirror(
         aligned, aligned_ink, config.osd_min_orientation_confidence
     )
     diagnostics["osd_status"] = quad.status
     diagnostics["osd_confidence"] = quad.confidence
     diagnostics["osd_script"] = quad.script
+    diagnostics["osd_mirror"] = quad.mirror
     diagnostics.update({f"osd_{k}": v for k, v in quad.diagnostics.items()})
 
     if quad.status != "RESOLVED" or quad.content_cw is None:
@@ -180,6 +200,7 @@ def detect_rotation(
             confidence=round(residual_conf, 4),
             residual_deg=round(residual, 3),
             quadrant_deg=None,
+            mirror_from_osd=None,
             warning=quad.warning or "Rotation could not be determined confidently",
             diagnostics=diagnostics,
         )
@@ -205,6 +226,7 @@ def detect_rotation(
             confidence=round(confidence, 4),
             residual_deg=round(residual, 3),
             quadrant_deg=quadrant,
+            mirror_from_osd=quad.mirror,
             residual_component_deg=0.0,
             diagnostics=diagnostics,
         )
@@ -215,6 +237,7 @@ def detect_rotation(
         confidence=round(confidence, 4),
         residual_deg=round(residual, 3),
         quadrant_deg=quadrant,
+        mirror_from_osd=quad.mirror,
         residual_component_deg=round(float(report_residual), 3),
         diagnostics=diagnostics,
     )
