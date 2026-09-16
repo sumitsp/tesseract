@@ -539,7 +539,7 @@ def run_blob_pipeline(
     settings = blob_settings or config.blob
     if settings is None or not settings.storage_account or not settings.container_name:
         raise ValueError(
-            "Blob settings missing. Set STORAGE_ACCOUNT, CONTAINER_NAME, BLOB_PREFIX "
+            "Blob settings missing. Set STORAGE_ACCOUNT, CONTAINER_NAME, PREFIX "
             "(and optional START_FROM) in the environment, or pass blob_settings."
         )
 

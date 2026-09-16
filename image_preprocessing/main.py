@@ -50,7 +50,7 @@ OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\image_preprocessing\ou
 # Azure Blob (used when INPUT_SOURCE == "blob")
 STORAGE_ACCOUNT = "azsadve2aipoc"
 CONTAINER_NAME = "YOUR_CONTAINER_NAME"
-BLOB_PREFIX = "Run1/Batch1/DEID_PNGs/"
+PREFIX = "Run1/Batch1/DEID_PNGs/"
 START_FROM = ""
 
 # Optional: full path to handwritten_printed_convnext_tiny.pth (None = default)
@@ -139,7 +139,7 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
         cfg.blob = BlobSettings(
             storage_account=STORAGE_ACCOUNT.strip(),
             container_name=CONTAINER_NAME.strip(),
-            prefix=BLOB_PREFIX.strip(),
+            prefix=PREFIX.strip(),
             start_from=START_FROM.strip(),
         )
     elif source != "local":
