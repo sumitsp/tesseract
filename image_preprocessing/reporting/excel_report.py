@@ -17,8 +17,6 @@ from image_preprocessing.results import PageResult
 COLUMNS: list[tuple[str, int]] = [
     ("Folder Name", 24),
     ("File Name", 32),
-    ("Original DPI", 14),
-    ("Output DPI", 14),
     ("Quality Score", 14),
     ("Quality", 10),
     ("Quality Warning", 28),
@@ -101,8 +99,6 @@ def _row_values(result: PageResult, quality_threshold: float) -> list:
     return [
         _folder_name(result),
         _file_name(result),
-        result.input_dpi,
-        result.output_dpi,
         result.quality_score,
         _quality_label(result, quality_threshold),
         result.quality_warning or "",
@@ -144,7 +140,7 @@ def _write_pages_sheet(
     ws.row_dimensions[1].height = 22
 
     angle_cols = {"Rotation Angle", "Tilt Angle"}
-    dpi_cols = {"Original DPI", "Output DPI", "Quality Score"}
+    numeric_cols = {"Quality Score"}
 
     for row_i, result in enumerate(results, start=2):
         values = _row_values(result, quality_threshold)
@@ -160,7 +156,7 @@ def _write_pages_sheet(
                 cell.fill = ALT_FILL
             if header in angle_cols and isinstance(value, (int, float)):
                 cell.number_format = ANGLE_FORMAT
-            elif header in dpi_cols and isinstance(value, (int, float)):
+            elif header in numeric_cols and isinstance(value, (int, float)):
                 cell.number_format = DPI_FORMAT
             elif header == "Time taken" and isinstance(value, (int, float)):
                 cell.number_format = TIME_FORMAT

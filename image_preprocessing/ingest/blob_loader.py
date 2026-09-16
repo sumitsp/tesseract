@@ -33,17 +33,15 @@ def list_folder_blobs(
 ) -> dict[str, list[str]]:
     """Map chart folder name -> blob paths under ``prefix/<folder>/``."""
     prefix = settings.prefix_normalized
-    list_prefix = prefix
-    if settings.start_from:
-        list_prefix = f"{prefix}{settings.start_from.strip('/')}/"
-        LOGGER.info("Listing selected chart only: %s", list_prefix)
     folder_blobs: dict[str, list[str]] = {}
-    for blob in container_client.list_blobs(name_starts_with=list_prefix):
+    for blob in container_client.list_blobs(name_starts_with=prefix):
         relative = blob.name[len(prefix) :] if blob.name.startswith(prefix) else blob.name
         parts = relative.split("/")
         if len(parts) < 2:
             continue
         folder_name = parts[0]
+        if settings.start_from and folder_name.lower() < settings.start_from.lower():
+            continue
         filename = parts[-1]
         if Path(filename).suffix.lower() not in RASTER_EXTENSIONS:
             continue
@@ -62,7 +60,7 @@ def list_chart_folders(
     idx = next((i for i, f in enumerate(folders) if f == start_from), None)
     if idx is None:
         raise FileNotFoundError(f"START_FROM folder not found under prefix: {start_from}")
-    LOGGER.info("Starting at %s; skipping %s earlier folder(s)", start_from, idx)
+    LOGGER.info("Starting at %s and continuing through later folders", start_from)
     return folders[idx:]
 
 
