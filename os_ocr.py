@@ -54,9 +54,11 @@ from docling.document_converter import DocumentConverter, ImageFormatOption
 from rapidocr.utils.typings import EngineType
 
 # ============================================================
-# AZURE CONFIGURATION (same style as file_counter.py)
+# RUN CONFIG — edit these (no .env)
 # ============================================================
 
+INPUT_SOURCE = "local"  # "local" or "blob"
+LOCAL_INPUT = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\input")
 STORAGE_ACCOUNT = "azsadve2aipoc"
 CONTAINER_NAME = "YOUR_CONTAINER_NAME"
 PREFIX = "Run1/Batch1/DEID_PNGs/"
@@ -72,7 +74,7 @@ MODELS_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\rapidocr_models")
 # OCR starts at this folder, then continues with later folders.
 # Use only the folder name, not the full path.
 START_FROM = "65214568_55368341"
-JPG_SUFFIXES = {".jpg", ".jpeg"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 DET_MODEL = MODELS_DIR / "PP-OCRv6_det_small.pth"
 REC_MODEL = MODELS_DIR / "PP-OCRv6_rec_small.pth"
 CLS_MODEL = MODELS_DIR / "ch_ptocr_mobile_v2.0_cls_mobile.pth"
@@ -180,7 +182,7 @@ def list_folder_blobs(container_client: ContainerClient) -> dict[str, list[str]]
                 continue
             folder_name = parts[0]
             filename = parts[-1]
-            if Path(filename).suffix.lower() not in JPG_SUFFIXES:
+            if Path(filename).suffix.lower() not in IMAGE_SUFFIXES:
                 continue
             folder_blobs.setdefault(folder_name, []).append(blob.name)
     except Exception as exc:
@@ -212,6 +214,47 @@ def list_jpgs(folder_blobs: dict[str, list[str]], folder_name: str) -> list[str]
     images = list(folder_blobs.get(folder_name, []))
     images.sort(key=jpg_sort_key)
     return images
+
+
+def list_local_images(input_path: Path) -> list[Path]:
+    path = input_path.expanduser().resolve()
+    if not path.exists():
+        raise SystemExit(f"LOCAL_INPUT does not exist: {path}")
+    if path.is_file():
+        if path.suffix.lower() not in IMAGE_SUFFIXES:
+            raise SystemExit(f"Unsupported image type: {path.suffix}")
+        return [path]
+    return sorted(
+        (p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES),
+        key=lambda p: str(p).lower(),
+    )
+
+
+def process_local(
+    converter: DocumentConverter,
+    input_path: Path,
+    output_dir: Path,
+) -> None:
+    images = list_local_images(input_path)
+    if not images:
+        raise SystemExit(f"No supported images found under: {input_path}")
+    root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for image_path in images:
+        relative = image_path.resolve().relative_to(root)
+        out_file = output_dir / relative.with_suffix(".json")
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        log(f"  {image_path} -> {out_file}")
+        try:
+            markdown, doc_dict = convert_image(converter, image_path)
+            page = {"markdown": markdown or "[no text detected]", "document": doc_dict}
+        except Exception as exc:
+            page = {
+                "markdown": f"[ERROR extracting {image_path.name}: {exc}]",
+                "document": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        out_file.write_text(json.dumps(page, indent=2, default=str), encoding="utf-8")
 
 
 def download_blob(
@@ -348,24 +391,32 @@ def process_folder(
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
+    source = INPUT_SOURCE.strip().lower()
+    if source not in {"local", "blob"}:
+        raise SystemExit('INPUT_SOURCE must be "local" or "blob"')
     log("=== DOCLING + RAPIDOCR (local models) ===")
     output_dir = OUTPUT_DIR
-    log(f"INPUT:  azure://{STORAGE_ACCOUNT}/{CONTAINER_NAME}/{PREFIX}")
+    log(
+        f"INPUT:  {LOCAL_INPUT if source == 'local' else f'azure://{STORAGE_ACCOUNT}/{CONTAINER_NAME}/{PREFIX}'}"
+    )
     log(f"OUTPUT: {output_dir}")
-    log(f"START_FROM: {START_FROM or '(first folder)'}")
 
+    log("Loading Docling + RapidOCR from local models...")
+    configure_ssl_for_model_downloads()
+    converter = build_converter()
+    if source == "local":
+        process_local(converter, LOCAL_INPUT, output_dir)
+        return
+
+    log(f"START_FROM: {START_FROM or '(first folder)'}")
     container_client = connect_azure()
     folder_blobs = list_folder_blobs(container_client)
     chart_folders = list_chart_folders(folder_blobs)
     if not chart_folders:
         raise SystemExit(
-            "No chart folders / JPG blobs found.\n"
+            "No chart folders / images found.\n"
             "Check CONTAINER_NAME, PREFIX, and blob folder structure."
         )
-
-    log("Loading Docling + RapidOCR from local models...")
-    configure_ssl_for_model_downloads()
-    converter = build_converter()
     output_dir.mkdir(parents=True, exist_ok=True)
     for folder_name in chart_folders:
         images = list_jpgs(folder_blobs, folder_name)
