@@ -1,1 +1,2 @@
 image_preprocessing/document_type/models/handwritten_printed_convnext_tiny.pth filter=lfs diff=lfs merge=lfs -text
+hw_printed_rf_test/models/page_printed_handwritten_convnext_tiny.pth filter=lfs diff=lfs merge=lfs -text

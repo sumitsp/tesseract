@@ -1,0 +1,22 @@
+{
+  "model_path": "hw_printed_rf_test\\models\\page_printed_handwritten_convnext_tiny.pth",
+  "best_val_acc": 1.0,
+  "classes": {
+    "0": "Printed",
+    "1": "Handwritten"
+  },
+  "train_counts": {
+    "Printed": 2125,
+    "Handwritten": 1634
+  },
+  "label_rule": {
+    "Printed": "Full typed EHR/print, including signature-only pages",
+    "Handwritten": "Full handwritten pages AND filled forms with handwriting"
+  },
+  "note": "Training stopped early after strong val accuracy; best checkpoint retained.",
+  "dataset": {
+    "printed": 2500,
+    "handwritten_pages": 422,
+    "rf_hw_crops_used": 1500
+  }
+}
