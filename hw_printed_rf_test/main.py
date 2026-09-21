@@ -29,6 +29,8 @@ from hw_printed_rf_test.classifier import (  # noqa: E402
 )
 from hw_printed_rf_test.page_classifier import (  # noqa: E402
     classify_page_convnext,
+    classify_page_hybrid,
+    load_hybrid_classifier,
     load_page_classifier,
 )
 
@@ -36,9 +38,10 @@ from hw_printed_rf_test.page_classifier import (  # noqa: E402
 # RUN CONFIG — edit these (no .env)
 # =============================================================================
 
-# "page_convnext" = new trained page model (default)
+# "hybrid"        = page ConvNeXt + RF upgrade for filled forms (recommended)
+# "page_convnext" = page model only
 # "rf_regions"    = old prescription RandomForest region aggregator
-CLASSIFIER_MODE = "page_convnext"
+CLASSIFIER_MODE = "hybrid"
 
 # "local" = file or folder on disk   |   "blob" = Azure chart folders
 INPUT_SOURCE = "local"
@@ -150,6 +153,8 @@ def append_result(sheet, folder: str, filename: str, result) -> None:
 def classify_one(image, mode: str, model) -> object:
     if mode == "rf_regions":
         return classify_page_image(image, clf=model)
+    if mode == "hybrid":
+        return classify_page_hybrid(image, bundle=model)
     return classify_page_convnext(image, bundle=model)
 
 
@@ -241,8 +246,11 @@ def main() -> int:
     if source not in {"local", "blob"}:
         print('INPUT_SOURCE must be "local" or "blob"', file=sys.stderr)
         return 1
-    if mode not in {"page_convnext", "rf_regions"}:
-        print('CLASSIFIER_MODE must be "page_convnext" or "rf_regions"', file=sys.stderr)
+    if mode not in {"page_convnext", "rf_regions", "hybrid"}:
+        print(
+            'CLASSIFIER_MODE must be "hybrid", "page_convnext", or "rf_regions"',
+            file=sys.stderr,
+        )
         return 1
 
     output_dir = OUTPUT_DIR.expanduser().resolve()
@@ -253,6 +261,9 @@ def main() -> int:
     if mode == "rf_regions":
         log("Loading region RandomForest model...")
         model = load_classifier()
+    elif mode == "hybrid":
+        log("Loading hybrid page ConvNeXt + RF models...")
+        model = load_hybrid_classifier()
     else:
         log("Loading page ConvNeXt model...")
         model = load_page_classifier()
