@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Test pipeline: region RF → page-wide printed / handwritten / mixed.
+"""Printed vs handwritten page test pipeline (local or blob).
 
-Edit RUN CONFIG, then:
+Edit RUN CONFIG, then from repo root:
 
-    python main.py
+    python hw_printed_rf_test/main.py
 """
 
 from __future__ import annotations
@@ -27,10 +27,18 @@ from hw_printed_rf_test.classifier import (  # noqa: E402
     classify_page_image,
     load_classifier,
 )
+from hw_printed_rf_test.page_classifier import (  # noqa: E402
+    classify_page_convnext,
+    load_page_classifier,
+)
 
 # =============================================================================
 # RUN CONFIG — edit these (no .env)
 # =============================================================================
+
+# "page_convnext" = new trained page model (default)
+# "rf_regions"    = old prescription RandomForest region aggregator
+CLASSIFIER_MODE = "page_convnext"
 
 # "local" = file or folder on disk   |   "blob" = Azure chart folders
 INPUT_SOURCE = "local"
@@ -139,7 +147,13 @@ def append_result(sheet, folder: str, filename: str, result) -> None:
     )
 
 
-def run_local(clf, output_dir: Path, report_path: Path) -> None:
+def classify_one(image, mode: str, model) -> object:
+    if mode == "rf_regions":
+        return classify_page_image(image, clf=model)
+    return classify_page_convnext(image, bundle=model)
+
+
+def run_local(model, mode: str, output_dir: Path, report_path: Path) -> None:
     images = list_local_images(LOCAL_INPUT)
     if not images:
         raise SystemExit(f"No images under: {LOCAL_INPUT}")
@@ -162,18 +176,18 @@ def run_local(clf, output_dir: Path, report_path: Path) -> None:
 
             result = PageTypeResult(
                 document_type="UNCERTAIN",
-                method="prescription_rf_regions",
+                method=mode,
                 p_handwritten=None,
                 error=f"Unreadable: {image_path}",
             )
         else:
-            result = classify_page_image(image, clf=clf)
+            result = classify_one(image, mode, model)
         append_result(sheet, folder, image_path.name, result)
         save_report(wb, report_path)
         log(f"    -> {result.document_type} p_hw={result.p_handwritten}")
 
 
-def run_blob(clf, output_dir: Path, report_path: Path) -> None:
+def run_blob(model, mode: str, output_dir: Path, report_path: Path) -> None:
     prefix = PREFIX.strip().strip("/") + "/"
     start_from = START_FROM.strip().strip("/")
     container = connect_container()
@@ -201,18 +215,17 @@ def run_blob(clf, output_dir: Path, report_path: Path) -> None:
             log(f"  {blob.name}")
             try:
                 data = container.download_blob(blob.name).readall()
-                local = tmp_path / filename
-                local.write_bytes(data)
+                (tmp_path / filename).write_bytes(data)
                 image = load_bgr_from_bytes(data)
                 if image is None:
                     raise ValueError("decode failed")
-                result = classify_page_image(image, clf=clf)
+                result = classify_one(image, mode, model)
             except Exception as exc:
                 from hw_printed_rf_test.classifier import PageTypeResult
 
                 result = PageTypeResult(
                     document_type="UNCERTAIN",
-                    method="prescription_rf_regions",
+                    method=mode,
                     p_handwritten=None,
                     error=f"{type(exc).__name__}: {exc}",
                 )
@@ -224,26 +237,36 @@ def run_blob(clf, output_dir: Path, report_path: Path) -> None:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
     source = INPUT_SOURCE.strip().lower()
+    mode = CLASSIFIER_MODE.strip().lower()
     if source not in {"local", "blob"}:
         print('INPUT_SOURCE must be "local" or "blob"', file=sys.stderr)
+        return 1
+    if mode not in {"page_convnext", "rf_regions"}:
+        print('CLASSIFIER_MODE must be "page_convnext" or "rf_regions"', file=sys.stderr)
         return 1
 
     output_dir = OUTPUT_DIR.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "hw_printed_rf_report.xlsx"
 
-    log("Loading region RandomForest model...")
-    clf = load_classifier()
+    log(f"CLASSIFIER_MODE={mode}")
+    if mode == "rf_regions":
+        log("Loading region RandomForest model...")
+        model = load_classifier()
+    else:
+        log("Loading page ConvNeXt model...")
+        model = load_page_classifier()
+
     log(f"INPUT_SOURCE={source}")
     log(f"Excel: {report_path}")
 
     if source == "local":
-        run_local(clf, output_dir, report_path)
+        run_local(model, mode, output_dir, report_path)
     else:
         if not CONTAINER_NAME or CONTAINER_NAME == "YOUR_CONTAINER_NAME":
             print("ERROR: set CONTAINER_NAME in main.py RUN CONFIG", file=sys.stderr)
             return 1
-        run_blob(clf, output_dir, report_path)
+        run_blob(model, mode, output_dir, report_path)
 
     log(f"Done. Report: {report_path}")
     return 0
