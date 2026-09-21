@@ -1,22 +1,71 @@
 {
-  "model_path": "hw_printed_rf_test\\models\\page_printed_handwritten_convnext_tiny.pth",
+  "model_path": "C:\\Users\\Pc\\Desktop\\tesseract\\hw_printed_rf_test\\models\\page_printed_handwritten_convnext_tiny.pth",
   "best_val_acc": 1.0,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.0450146969617586,
+      "acc": 1.0,
+      "class_acc": {
+        "Printed": 1.0,
+        "Handwritten": 1.0
+      },
+      "n": 663
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.0361832402995594,
+      "acc": 0.9984917043740573,
+      "class_acc": {
+        "Printed": 1.0,
+        "Handwritten": 0.9965277777777778
+      },
+      "n": 663
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.035627266194184055,
+      "acc": 0.9984917043740573,
+      "class_acc": {
+        "Printed": 1.0,
+        "Handwritten": 0.9965277777777778
+      },
+      "n": 663
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.019147966147215117,
+      "acc": 0.947209653092006,
+      "class_acc": {
+        "Printed": 1.0,
+        "Handwritten": 0.8784722222222222
+      },
+      "n": 663
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.04008819715637217,
+      "acc": 0.9969834087481146,
+      "class_acc": {
+        "Printed": 1.0,
+        "Handwritten": 0.9930555555555556
+      },
+      "n": 663
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.04126878828009268,
+      "acc": 0.9984917043740573,
+      "class_acc": {
+        "Printed": 1.0,
+        "Handwritten": 0.9965277777777778
+      },
+      "n": 663
+    }
+  ],
+  "manifest": "C:\\Users\\Pc\\Desktop\\tesseract\\hw_printed_rf_test\\prepared_dataset\\manifest.csv",
   "classes": {
     "0": "Printed",
     "1": "Handwritten"
-  },
-  "train_counts": {
-    "Printed": 2125,
-    "Handwritten": 1634
-  },
-  "label_rule": {
-    "Printed": "Full typed EHR/print, including signature-only pages",
-    "Handwritten": "Full handwritten pages AND filled forms with handwriting"
-  },
-  "note": "Training stopped early after strong val accuracy; best checkpoint retained.",
-  "dataset": {
-    "printed": 2500,
-    "handwritten_pages": 422,
-    "rf_hw_crops_used": 1500
   }
 }
