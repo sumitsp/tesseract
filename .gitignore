@@ -46,6 +46,8 @@ output/
 *.onnx
 # ConvNeXt HW/printed classifier — tracked via Git LFS
 !image_preprocessing/document_type/models/handwritten_printed_convnext_tiny.pth
+# Region RF HW/printed test model (small, needed after pull)
+!hw_printed_rf_test/models/data.joblib
 
 # Archives / dumps
 *.zip
