@@ -45,12 +45,24 @@ class DocumentTypeResult:
 
 
 def default_model_path() -> Path:
+    newer = (
+        Path(__file__).resolve().parents[2]
+        / "hw_printed_rf_test"
+        / "models"
+        / "page_printed_handwritten_convnext_tiny.pth"
+    )
+    if newer.is_file() and newer.stat().st_size > 1_000_000:
+        return newer
     return Path(hw_printed.DEFAULT_MODEL_PATH)
 
 
 def load_classifier(model_path: Path | None = None) -> Any:
     path = Path(model_path) if model_path is not None else default_model_path()
     LOGGER.info("Loading handwritten/printed classifier from %s", path)
+    if path.name == "page_printed_handwritten_convnext_tiny.pth":
+        from hw_printed_rf_test.page_classifier import load_hybrid_classifier
+
+        return load_hybrid_classifier(path)
     return hw_printed.load_model(path)
 
 
@@ -74,6 +86,18 @@ def classify_page(image: np.ndarray, model: Any | None = None) -> DocumentTypeRe
                 method="blank_page",
                 p_handwritten=None,
                 raw_label="Uncertain",
+            )
+        if isinstance(model, dict) and "model" in model:
+            from hw_printed_rf_test.page_classifier import classify_page_hybrid
+
+            hybrid = classify_page_hybrid(image, bundle=model)
+            return DocumentTypeResult(
+                document_type=hybrid.document_type,
+                confidence=hybrid.p_handwritten,
+                method=hybrid.method,
+                p_handwritten=hybrid.p_handwritten,
+                raw_label=hybrid.document_type,
+                error=hybrid.error,
             )
         image_bytes = encode_png_bytes(image)
         label, confidence, method = hw_printed.classify_image_type(image_bytes, model=model)
