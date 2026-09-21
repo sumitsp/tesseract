@@ -38,7 +38,7 @@ from hw_printed_rf_test.page_classifier import (  # noqa: E402
 # RUN CONFIG — edit these (no .env)
 # =============================================================================
 
-# "hybrid"        = page ConvNeXt + RF upgrade for filled forms (recommended)
+# "hybrid"        = page ConvNeXt + ink evidence for filled forms (recommended)
 # "page_convnext" = page model only
 # "rf_regions"    = old prescription RandomForest region aggregator
 CLASSIFIER_MODE = "hybrid"
@@ -262,7 +262,7 @@ def main() -> int:
         log("Loading region RandomForest model...")
         model = load_classifier()
     elif mode == "hybrid":
-        log("Loading hybrid page ConvNeXt + RF models...")
+        log("Loading hybrid page ConvNeXt + ink detector...")
         model = load_hybrid_classifier()
     else:
         log("Loading page ConvNeXt model...")
