@@ -30,6 +30,9 @@ INK_SCORE_THRESHOLD = 0.48
 INK_TALL_COMPONENT_MIN = 8
 INK_MIN_Y_SPAN_FRAC = 0.22
 INK_MIN_Y_STD = 55.0
+# ConvNeXt was not trained on empty sheets and often predicts HANDWRITTEN.
+BLANK_INK_RATIO_MAX = 0.004
+BLANK_METHOD = "blank_page"
 
 
 def letterbox_rgb(image: Image.Image, fill=(255, 255, 255)) -> Image.Image:
@@ -39,6 +42,17 @@ def letterbox_rgb(image: Image.Image, fill=(255, 255, 255)) -> Image.Image:
     canvas = Image.new("RGB", (side, side), fill)
     canvas.paste(image, ((side - w) // 2, (side - h) // 2))
     return canvas
+
+
+def page_ink_ratio(image_bgr: np.ndarray) -> float:
+    """Fraction of dark (ink-like) pixels after Otsu; used for blank detection."""
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thr = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ink = float(np.mean(thr == 0))
+    if thr.mean() < 127:
+        ink = 1.0 - ink
+    return ink
 
 
 def handwriting_ink_evidence(image_bgr: np.ndarray) -> dict[str, float | int]:
@@ -193,6 +207,14 @@ def classify_page_convnext(
     bundle: dict[str, Any] | None = None,
 ) -> PageTypeResult:
     try:
+        ink_r = page_ink_ratio(image_bgr)
+        if ink_r < BLANK_INK_RATIO_MAX:
+            return PageTypeResult(
+                document_type="UNCERTAIN",
+                method=BLANK_METHOD,
+                p_handwritten=0.0,
+                region_labels={"blank": 1, "ink_ratio": ink_r},
+            )
         model_bundle = bundle if bundle is not None else load_page_classifier()
         tensor = _preprocess(image_bgr, model_bundle).to(model_bundle["device"])
         with torch.inference_mode():
@@ -236,7 +258,7 @@ def classify_page_hybrid(
     """Page ConvNeXt first; ink evidence upgrades filled forms to HANDWRITTEN."""
     model_bundle = bundle if bundle is not None else load_hybrid_classifier()
     page = classify_page_convnext(image_bgr, bundle=model_bundle)
-    if page.error or page.document_type == "HANDWRITTEN":
+    if page.error or page.document_type == "HANDWRITTEN" or page.method == BLANK_METHOD:
         return page
 
     ink = handwriting_ink_evidence(image_bgr)
