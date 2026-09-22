@@ -25,8 +25,11 @@ INDEX_TO_CLASS = {0: "Printed", 1: "Handwritten"}
 # Page model alone is printed-heavy on filled forms.
 DEFAULT_DECISION_THRESHOLD = 0.28
 # Ink heuristic upgrade (filled forms have taller irregular strokes; EHR usually does not).
-INK_SCORE_THRESHOLD = 0.42
-INK_TALL_COMPONENT_MIN = 6
+# Logos/graphics make tall blobs too, so require vertical spread across the page.
+INK_SCORE_THRESHOLD = 0.48
+INK_TALL_COMPONENT_MIN = 8
+INK_MIN_Y_SPAN_FRAC = 0.22
+INK_MIN_Y_STD = 55.0
 
 
 def letterbox_rgb(image: Image.Image, fill=(255, 255, 255)) -> Image.Image:
@@ -39,7 +42,12 @@ def letterbox_rgb(image: Image.Image, fill=(255, 255, 255)) -> Image.Image:
 
 
 def handwriting_ink_evidence(image_bgr: np.ndarray) -> dict[str, float | int]:
-    """Fast cue for filled-form / freehand ink vs clean typed EHR."""
+    """Fast cue for filled-form / freehand ink vs clean typed EHR.
+
+    Header logos and decorative graphics often look like a few tall irregular
+    blobs clustered in one band. Real filled-form handwriting spreads down the
+    page, so tall components must also show vertical dispersion.
+    """
     h0, w0 = image_bgr.shape[:2]
     scale = 1000.0 / float(max(h0, w0))
     image = image_bgr
@@ -69,28 +77,52 @@ def handwriting_ink_evidence(image_bgr: np.ndarray) -> dict[str, float | int]:
     wide = 0
     area_sum = 0
     heights: list[int] = []
+    tall_ys: list[float] = []
     for i in range(1, stats.shape[0]):
-        _x, _y, ww, hh, area = stats[i]
+        _x, y, ww, hh, area = stats[i]
         if area < 20 or area > 0.03 * page:
             continue
         ar = ww / float(hh + 1e-6)
         if ar < 0.08 or ar > 10:
+            continue
+        fill = area / float(ww * hh + 1e-6)
+        # Dense / logo-sized blobs (facility marks, seals) — not pen strokes.
+        if area > 0.008 * page:
+            continue
+        if ww > 0.22 * w and hh > 0.06 * h:
+            continue
+        if fill > 0.72:
+            continue
+        # Header-band graphics: large-ish components only in the top strip.
+        if y < 0.16 * h and area > 0.0035 * page and ww >= 40:
             continue
         good += 1
         area_sum += int(area)
         heights.append(int(hh))
         if hh >= 18 and ww >= 25:
             tall += 1
+            tall_ys.append(float(y) + 0.5 * float(hh))
         if ar >= 1.8 and hh <= 40:
             wide += 1
     hstd = float(np.std(heights)) if len(heights) > 3 else 0.0
     ink_ratio = area_sum / page
+    if len(tall_ys) >= 2:
+        y_std = float(np.std(tall_ys))
+        y_span_frac = float((max(tall_ys) - min(tall_ys)) / float(h))
+    else:
+        y_std = 0.0
+        y_span_frac = 0.0
+    # Logos cluster in one band (low y_span); handwriting spans the form.
+    dispersed = y_span_frac >= INK_MIN_Y_SPAN_FRAC and y_std >= INK_MIN_Y_STD
     score = (
-        0.45 * min(tall / 20.0, 1.0)
-        + 0.25 * min(hstd / 8.0, 1.0)
-        + 0.20 * min(wide / 30.0, 1.0)
+        0.40 * min(tall / 20.0, 1.0)
+        + 0.20 * min(hstd / 8.0, 1.0)
+        + 0.15 * min(wide / 30.0, 1.0)
         + 0.10 * min(ink_ratio / 0.05, 1.0)
+        + 0.15 * min(y_span_frac / 0.45, 1.0)
     )
+    if not dispersed:
+        score = min(score, 0.35)
     return {
         "score": float(score),
         "tall": int(tall),
@@ -98,6 +130,9 @@ def handwriting_ink_evidence(image_bgr: np.ndarray) -> dict[str, float | int]:
         "good": int(good),
         "height_std": float(hstd),
         "ink_ratio": float(ink_ratio),
+        "y_span_frac": float(y_span_frac),
+        "y_std": float(y_std),
+        "dispersed": int(1 if dispersed else 0),
     }
 
 
@@ -207,7 +242,9 @@ def classify_page_hybrid(
     ink = handwriting_ink_evidence(image_bgr)
     score = float(ink["score"])
     tall = int(ink["tall"])
-    if score >= INK_SCORE_THRESHOLD or tall >= INK_TALL_COMPONENT_MIN:
+    dispersed = bool(ink.get("dispersed"))
+    # Only upgrade when ink is both strong and spread down the page (not a logo).
+    if dispersed and (score >= INK_SCORE_THRESHOLD or tall >= INK_TALL_COMPONENT_MIN):
         return PageTypeResult(
             document_type="HANDWRITTEN",
             method=HYBRID_METHOD,
@@ -218,6 +255,8 @@ def classify_page_hybrid(
                 "tall_components": tall,
                 "wide_components": int(ink["wide"]),
                 "height_std": float(ink["height_std"]),
+                "y_span_frac": float(ink["y_span_frac"]),
+                "y_std": float(ink["y_std"]),
             },
         )
     page.region_labels = {
@@ -225,5 +264,7 @@ def classify_page_hybrid(
         "tall_components": tall,
         "wide_components": int(ink["wide"]),
         "height_std": float(ink["height_std"]),
+        "y_span_frac": float(ink["y_span_frac"]),
+        "y_std": float(ink["y_std"]),
     }
     return page
