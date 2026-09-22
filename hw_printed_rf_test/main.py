@@ -79,6 +79,18 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def natural_key(value: str | Path) -> list:
+    """Sort 2 before 10 (numeric chunks compared as ints)."""
+    import re
+
+    text = str(value).replace("\\", "/").lower()
+    return [
+        int(part) if part.isdigit() else part
+        for part in re.split(r"(\d+)", text)
+        if part != ""
+    ]
+
+
 def connect_container():
     from azure.identity import DefaultAzureCredential
     from azure.storage.blob import BlobServiceClient
@@ -100,7 +112,7 @@ def list_local_images(input_path: Path) -> list[Path]:
         return [path]
     return sorted(
         (p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES),
-        key=lambda p: str(p).lower(),
+        key=natural_key,
     )
 
 
@@ -206,20 +218,25 @@ def run_blob(model, mode: str, output_dir: Path, report_path: Path) -> None:
 
     with tempfile.TemporaryDirectory(prefix="hw_rf_") as tmp:
         tmp_path = Path(tmp)
+        jobs: list[tuple[str, str, str]] = []
         for blob in container.list_blobs(name_starts_with=prefix):
             relative = blob.name[len(prefix) :] if blob.name.startswith(prefix) else blob.name
             parts = relative.split("/")
             if len(parts) < 2:
                 continue
             folder, filename = parts[0], parts[-1]
-            if start_from and folder.lower() < start_from.lower():
+            if start_from and natural_key(folder) < natural_key(start_from):
                 continue
             if Path(filename).suffix.lower() not in IMAGE_SUFFIXES:
                 continue
+            jobs.append((folder, filename, blob.name))
 
-            log(f"  {blob.name}")
+        jobs.sort(key=lambda item: (natural_key(item[0]), natural_key(item[1])))
+
+        for folder, filename, blob_name in jobs:
+            log(f"  {blob_name}")
             try:
-                data = container.download_blob(blob.name).readall()
+                data = container.download_blob(blob_name).readall()
                 (tmp_path / filename).write_bytes(data)
                 image = load_bgr_from_bytes(data)
                 if image is None:
