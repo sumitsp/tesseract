@@ -84,11 +84,15 @@ def natural_key(value: str | Path) -> list:
     import re
 
     text = str(value).replace("\\", "/").lower()
-    return [
-        int(part) if part.isdigit() else part
-        for part in re.split(r"(\d+)", text)
-        if part != ""
-    ]
+    key: list[tuple[int, int | str]] = []
+    for part in re.split(r"(\d+)", text):
+        if part == "":
+            continue
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part))
+    return key
 
 
 def connect_container():
