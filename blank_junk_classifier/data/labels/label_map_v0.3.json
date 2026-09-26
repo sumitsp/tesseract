@@ -1,0 +1,54 @@
+{
+  "version": "v0.3",
+  "flags": [
+    "KEEP",
+    "BLANK",
+    "JUNK"
+  ],
+  "note": "Training/inference use coarse flags only. Fine classes from v0.2 are retained in primary_class and mapped via taxonomy.to_flag().",
+  "flag_by_primary_class": {
+    "KEEP": "KEEP",
+    "RETAIN_CLINICAL": "KEEP",
+    "RETAIN_DEMOGRAPHIC": "KEEP",
+    "RETAIN_CLINICAL_IMAGE": "KEEP",
+    "BLANK": "BLANK",
+    "BLANK_ABSOLUTE": "BLANK",
+    "BLANK_TECHNICAL": "BLANK",
+    "BLANK_SYSTEM": "BLANK",
+    "BLANK_HEADER_FOOTER_ONLY": "BLANK",
+    "JUNK": "JUNK",
+    "JUNK_COVER_REQUEST": "JUNK",
+    "JUNK_FAX_TRANSMISSION": "JUNK",
+    "JUNK_SEPARATOR_BARCODE": "JUNK",
+    "JUNK_PRINTER_SYSTEM_TEST": "JUNK",
+    "JUNK_POSTAL_MAIL": "JUNK",
+    "JUNK_INSURANCE_ID": "JUNK",
+    "JUNK_BLACK_SCAN_DEFECT": "JUNK",
+    "JUNK_NON_CLINICAL_PHOTO": "JUNK",
+    "UNCERTAIN_REVIEW": null
+  },
+  "counts": {
+    "total_pages": 212,
+    "by_flag": {
+      "null": 21,
+      "BLANK": 2,
+      "JUNK": 37,
+      "KEEP": 152
+    },
+    "by_keep_delete": {
+      "REVIEW": 21,
+      "DELETE": 39,
+      "KEEP": 152
+    },
+    "new_keep_pages": 150,
+    "by_primary_class": {
+      "UNCERTAIN_REVIEW": 21,
+      "BLANK_HEADER_FOOTER_ONLY": 2,
+      "JUNK_COVER_REQUEST": 29,
+      "JUNK_FAX_TRANSMISSION": 7,
+      "JUNK_INSURANCE_ID": 1,
+      "RETAIN_DEMOGRAPHIC": 2,
+      "KEEP": 150
+    }
+  }
+}

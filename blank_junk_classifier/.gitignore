@@ -1,0 +1,25 @@
+# Local / generated — do not commit PHI dumps or run outputs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Training OCR often contains PHI — keep local
+data/raw/keep_sources_v0.3/
+data/raw/keep_paste_v0.3.txt
+data/raw/ehr_pages_v0.3.jsonl
+data/raw/ehr_pages_v0.2.jsonl
+data/raw/*.xlsx
+
+# Run outputs
+reports/*.csv
+reports/*.xlsx
+reports/inference*
+reports/*_eval.json
+reports/model_comparison.json
+reports/dataset_quality*
+
+# Optional embedding artifacts
+models/embedding_flat.joblib
+models/*.tmp

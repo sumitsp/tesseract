@@ -1,0 +1,22 @@
+# EHR Blank/Junk page classifier (OCR text only)
+# See configs/default.yaml and reports/ for dataset readiness.
+
+python_requires = ">=3.10"
+
+[project]
+name = "blank-junk-classifier"
+version = "0.1.0"
+description = "Conservative OCR-text classifier for EHR blank/junk page detection"
+dependencies = [
+  "numpy",
+  "pandas",
+  "scikit-learn>=1.3",
+  "scipy",
+  "joblib",
+  "pyyaml",
+  "openpyxl",
+]
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers"]
+boosting = ["xgboost"]

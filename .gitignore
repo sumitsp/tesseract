@@ -51,6 +51,8 @@ output/
 # Retrained binary page classifier (Printed vs Handwritten)
 !hw_printed_rf_test/models/page_printed_handwritten_convnext_tiny.pth
 !hw_printed_rf_test/models/page_printed_handwritten_metadata.json
+# Blank/junk page flagger (inference on other PCs)
+!blank_junk_classifier/models/tfidf_flat.joblib
 
 # Large prepared training rasters (regenerate with prepare_dataset.py)
 hw_printed_rf_test/prepared_dataset/

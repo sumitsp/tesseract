@@ -1,0 +1,53 @@
+# Default config for OCR-text-only KEEP / BLANK / JUNK flagging.
+# Nothing is deleted — pages are flagged for downstream review/routing.
+# Safety rule: incorrectly flagging KEEP as BLANK/JUNK is far worse than
+# leaving junk as KEEP.
+
+paths:
+  raw_jsonl: data/raw/ehr_pages_v0.3.jsonl
+  label_map: data/labels/label_map_v0.3.json
+  processed_dir: data/processed
+  models_dir: models
+  reports_dir: reports
+
+model_version: "bjc-ocr-v0.3.0"
+
+routing:
+  min_dictionary_words: 2
+  # Empty OCR → KEEP + review_required (never auto-BLANK)
+  empty_ocr_flag: KEEP
+
+split:
+  group_key: split_group
+  test_size: 0.25
+  random_state: 42
+  max_pages_per_template_train: 10
+
+training:
+  require_train_eligible: true
+  include_medium_keep: true
+  # Cost ratio: KEEP→BLANK/JUNK vs reverse (class_weight multiplier)
+  retain_delete_cost_ratio: 50.0
+
+tfidf:
+  word_ngram_range: [1, 2]
+  char_ngram_range: [3, 5]
+  word_max_features: 40000
+  char_max_features: 40000
+  min_df: 1
+  classifier: logistic_regression  # logistic_regression | linear_svc
+
+embeddings:
+  model_name: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  classifier: logistic_regression
+
+decision:
+  min_flag_confidence: 0.70
+  junk_blank_min_confidence: 0.85
+  keep_veto_prob: 0.10
+
+taxonomy:
+  flags:
+    - KEEP
+    - BLANK
+    - JUNK
