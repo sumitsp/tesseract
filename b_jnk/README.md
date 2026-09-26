@@ -11,7 +11,7 @@ Output is a **CSV of flags only**. Nothing is deleted or removed from the packet
 - **v0.2** blank / junk / review pages
 - **New KEEP** clinical OCR (human-labeled) from real encounter notes
 
-Output is still **flagging CSV only** (`KEEP` / `BLANK` / `JUNK`) — nothing is deleted.
+Output is still **flagging CSV/Excel only** (`KEEP` / `BLANK` / `JUNK`) — nothing is deleted. See `PROTOCOL.md` for blank/junk typology + mandatory clinical-image / demographic retention safeguards.
 
 Rebuild dataset:
 

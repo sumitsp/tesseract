@@ -332,6 +332,27 @@ def main() -> int:
         used_nonempty.add(h)
     final.extend(empties)
 
+    # Human flag corrections (e.g. printer-footer pages mis-labeled KEEP)
+    corr_path = ROOT / "data/labels/label_corrections_v0.3.json"
+    if corr_path.exists():
+        corr = json.loads(corr_path.read_text(encoding="utf-8"))
+        by_id = corr.get("by_page_id") or {}
+        n_corr = 0
+        for r in final:
+            flag = by_id.get(r["page_id"])
+            if not flag:
+                continue
+            r["label"]["primary_class"] = flag
+            r["label"]["flag"] = flag
+            r["label"]["keep_delete"] = (
+                "DELETE" if flag in {"BLANK", "JUNK"} else "KEEP"
+            )
+            r["label"]["confidence"] = "HIGH"
+            r["annotation"]["label_version"] = "v0.3.1"
+            r["train_eligible"] = bool((r.get("ocr_text") or "").strip())
+            n_corr += 1
+        print(f"Applied {n_corr} label corrections from {corr_path.name}")
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fh:
         for r in final:

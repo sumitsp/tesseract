@@ -1,4 +1,4 @@
-"""Inference API — flags pages as KEEP / BLANK / JUNK (CSV-friendly)."""
+"""Inference API — flags pages as KEEP / BLANK / JUNK (+ protocol audit tags)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from src.explainability.evidence import explain_page
 from src.features.ocr_features import top_evidence
 from src.models.classifiers import FlatClassifier
 from src.models.decision import DecisionConfig, decide_from_proba
+from src.preprocessing.protocol import analyze_protocol
 from src.preprocessing.routing import route_empty_or_unreadable
 
 
@@ -18,6 +19,7 @@ class InferenceResult:
     flag: str  # KEEP | BLANK | JUNK
     confidence: float
     review_required: bool
+    audit_tag: str  # typology / retention subtype for chain of custody
     top_evidence: str
     model_version: str
     decision_reason: str
@@ -28,7 +30,6 @@ class InferenceResult:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    # Legacy aliases for older scripts
     @property
     def page_type(self) -> str:
         return self.flag
@@ -57,28 +58,43 @@ class PageClassifierService:
             ocr_text, min_dictionary_words=self.min_dictionary_words
         )
         if route.routed:
-            # Empty/unreadable OCR: flag KEEP + review (never auto-BLANK)
+            hit = analyze_protocol(ocr_text)
+            # Empty OCR cannot be proven absolute-blank vs clinical image failure
+            audit = "BLANK_ABSOLUTE_CANDIDATE" if route.reason == "empty_ocr" else "UNREADABLE_OCR"
+            if hit.retain_clinical_image:
+                audit = "KEEP_CLINICAL_IMAGE"
+            elif hit.retain_demographic:
+                audit = "KEEP_DEMOGRAPHIC"
             return InferenceResult(
                 page_id=page_id,
                 flag="KEEP",
                 confidence=route.confidence,
                 review_required=True,
+                audit_tag=audit,
                 top_evidence=route.reason or "empty_or_unreadable_ocr",
                 model_version=self.model_version,
                 decision_reason=f"pre_model_route:{route.reason}",
             )
 
         proba = self.model.predict_proba([ocr_text])[0]
-        decision = decide_from_proba(proba, list(self.model.labels), config=self.decision)
+        decision = decide_from_proba(
+            proba,
+            list(self.model.labels),
+            ocr_text=ocr_text,
+            config=self.decision,
+        )
         evidence = explain_page(self.model, ocr_text, decision.flag)
         if not evidence:
             evidence = top_evidence(ocr_text)
+        if decision.protocol_evidence:
+            evidence = list(decision.protocol_evidence) + evidence
         return InferenceResult(
             page_id=page_id,
             flag=decision.flag,
             confidence=round(decision.confidence, 4),
             review_required=decision.review_required,
-            top_evidence="; ".join(evidence),
+            audit_tag=decision.audit_tag or decision.flag,
+            top_evidence="; ".join(evidence[:8]),
             model_version=self.model_version,
             decision_reason=decision.reason,
             p_keep=round(decision.p_keep, 4),

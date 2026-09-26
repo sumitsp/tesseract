@@ -6,7 +6,7 @@
     "models_dir": "models",
     "reports_dir": "reports"
   },
-  "model_version": "bjc-ocr-v0.3.0",
+  "model_version": "bjc-ocr-v0.3.1",
   "routing": {
     "min_dictionary_words": 2,
     "empty_ocr_flag": "KEEP"
@@ -37,9 +37,11 @@
   "decision": {
     "min_flag_confidence": 0.70,
     "junk_blank_min_confidence": 0.85,
-    "keep_veto_prob": 0.10
+    "keep_veto_prob": 0.10,
+    "enforce_retention_safeguards": true
   },
   "taxonomy": {
-    "flags": ["KEEP", "BLANK", "JUNK"]
+    "flags": ["KEEP", "BLANK", "JUNK"],
+    "protocol": "blank_junk_elimination_v1"
   }
 }

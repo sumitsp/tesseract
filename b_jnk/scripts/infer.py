@@ -64,6 +64,7 @@ from src.models.decision import DecisionConfig  # noqa: E402
 COLUMNS = [
     "page_id",
     "flag",
+    "audit_tag",
     "confidence",
     "review_required",
     "p_keep",

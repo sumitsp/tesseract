@@ -34,7 +34,13 @@ _DICT = frozenset(
 )
 
 PATTERN_GROUPS: dict[str, tuple[str, ...]] = {
-    "fax": (r"\bfax\b", r"transmission", r"transmittal", r"pages?\s*sent"),
+    "fax": (
+        r"\bfax\b",
+        r"transmission",
+        r"transmittal",
+        r"pages?\s*sent",
+        r"delivery\s*(?:receipt|confirmation)",
+    ),
     "request_cover": (
         r"medical records? request",
         r"request for medical records",
@@ -43,16 +49,23 @@ PATTERN_GROUPS: dict[str, tuple[str, ...]] = {
         r"e-?request",
         r"pull list",
         r"records retrieval",
+        r"copy service",
     ),
     "confidential": (r"confidential", r"hipaa", r"protected health"),
     "demographic": (
         r"date of birth",
         r"\bdob\b",
         r"patient demographics?",
+        r"\bdemographics?\b",
         r"registration",
         r"face\s*sheet",
+        r"\bfacesheet\b",
         r"account number",
         r"member id",
+        r"guarantor",
+        r"emergency\s*contact",
+        r"\bmrn\b",
+        r"medical\s*record\s*number",
         r"registro del portal",
     ),
     "clinical": (
@@ -73,6 +86,22 @@ PATTERN_GROUPS: dict[str, tuple[str, ...]] = {
         r"hospital course",
         r"visit diagnosis",
         r"progress note",
+        r"subjective",
+        r"\bobjective\b",
+        r"imp/?\s*plan",
+    ),
+    "clinical_image": (
+        r"wound\s*(?:photo|image|tracking)",
+        r"dermatolog",
+        r"lesion\s*(?:photo|image)",
+        r"endoscop",
+        r"colonoscop",
+        r"retinal",
+        r"fundus",
+        r"ophthalmolog",
+        r"oct\s*(?:nerve|mac)",
+        r"slit\s*lamp",
+        r"clinical\s*(?:photo|image)",
     ),
     "vendor_admin": (
         r"advantmed",
@@ -93,8 +122,35 @@ PATTERN_GROUPS: dict[str, tuple[str, ...]] = {
         r"\brx\b",
         r"policy\s*#",
         r"member id\s*#",
+        r"driver'?s?\s*license",
+        r"\bssn\b",
+        r"health\s*insurance\s*card",
     ),
-    "separator": (r"\bbarcode\b", r"batch\s*separator", r"divider"),
+    "separator": (
+        r"\bbarcode\b",
+        r"batch\s*separator",
+        r"divider",
+        r"patch\s*code",
+        r"scanner\s*calibration",
+    ),
+    "system_blank": (
+        r"intentionally left blank",
+        r"this page intentionally left blank",
+        r"page left blank",
+    ),
+    "printer_test": (
+        r"printer\s*(?:test|diagnostic|configuration|alignment)",
+        r"print(?:er)?\s*test\s*page",
+        r"hardware\s*(?:test|alignment)",
+    ),
+    "postal_mail": (
+        r"certified\s*mail",
+        r"postal\s*receipt",
+        r"shipping\s*label",
+        r"\bfedex\b",
+        r"\busps\b",
+        r"tracking\s*(?:number|#)",
+    ),
 }
 
 _DATE = re.compile(

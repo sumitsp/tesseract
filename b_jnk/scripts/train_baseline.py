@@ -133,7 +133,9 @@ def main() -> int:
                 y_pred_h.append(route.flag)
                 continue
             _best, mat = hier.predict_proba_page_types([r.ocr_text])
-            d = decide_from_proba(mat[0], hier.labels, config=decision)
+            d = decide_from_proba(
+                mat[0], hier.labels, ocr_text=r.ocr_text, config=decision
+            )
             y_true_h.append(r.flag)
             y_pred_h.append(d.flag)
         h_metrics = evaluate_predictions(y_true_h, y_pred_h)
