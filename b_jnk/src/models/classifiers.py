@@ -68,6 +68,19 @@ class FlatClassifier:
         return joblib.load(path)
 
 
+def _expand_hard_negatives(
+    rows: list[PageRecord], *, copies: int = 3
+) -> list[PageRecord]:
+    """Repeat clinical hard-negatives so KEEP vs admin-junk boundary sticks."""
+    if copies <= 1:
+        return list(rows)
+    out = list(rows)
+    for r in rows:
+        if r.hard_negative and r.flag == "KEEP":
+            out.extend([r] * (copies - 1))
+    return out
+
+
 def train_tfidf_flat(
     train_rows: list[PageRecord],
     *,
@@ -78,7 +91,9 @@ def train_tfidf_flat(
     word_max_features: int = 40000,
     char_max_features: int = 40000,
     min_df: int = 1,
+    hard_negative_copies: int = 3,
 ) -> FlatClassifier:
+    train_rows = _expand_hard_negatives(train_rows, copies=hard_negative_copies)
     texts = [r.ocr_text for r in train_rows]
     y = _flags_from_rows(train_rows)
     labels = sorted(set(y))
