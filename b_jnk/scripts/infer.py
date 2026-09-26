@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Flag local OCR pages as KEEP / BLANK / JUNK → Excel (nothing is deleted).
 
+Edit INPUT_PATH / OUTPUT_PATH below, then run:
+  python scripts/infer.py
+
 Reads JSONL/JSON/CSV/XLSX (page_id + ocr_text) or a folder of .txt files.
 Prints progress to the terminal while processing.
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import sys
@@ -16,6 +18,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# ---------------------------------------------------------------------------
+# Edit these paths for your machine (no CLI args needed)
+# ---------------------------------------------------------------------------
+INPUT_PATH = ROOT / "data" / "samples" / "sample_pages.jsonl"
+# Examples:
+# INPUT_PATH = Path(r"C:\ocr\pages.jsonl")
+# INPUT_PATH = Path("/Users/you/ocr/pages")          # folder of .txt
+# INPUT_PATH = ROOT / "data" / "raw" / "ehr_pages_v0.3.jsonl"
+
+OUTPUT_PATH = ROOT / "reports" / "page_flags.xlsx"
+# OUTPUT_PATH = Path(r"C:\ocr\out\page_flags.xlsx")
+
+MODEL_PATH = ROOT / "models" / "tfidf_flat.joblib"
+CONFIG_PATH = ROOT / "configs" / "default.json"
+# ---------------------------------------------------------------------------
 
 
 def _load_cfg(path: Path) -> dict:
@@ -26,7 +44,7 @@ def _load_cfg(path: Path) -> dict:
         import yaml
         return yaml.safe_load(text)
     except ImportError as exc:
-        raise SystemExit("Install PyYAML or pass --config configs/default.json") from exc
+        raise SystemExit("Install PyYAML or use configs/default.json") from exc
 
 
 from src.inference.predict import InferenceResult, PageClassifierService  # noqa: E402
@@ -159,7 +177,7 @@ def _write_excel(path: Path, rows: list[dict]) -> None:
     except Exception as exc:
         raise SystemExit(
             "Excel output needs openpyxl (pip install openpyxl).\n"
-            "Or pass --output reports/page_flags.csv"
+            "Or set OUTPUT_PATH to a .csv file"
         ) from exc
 
 
@@ -172,31 +190,22 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Flag OCR pages as KEEP / BLANK / JUNK → Excel (flagging only)"
-    )
-    ap.add_argument("--model", default=str(ROOT / "models/tfidf_flat.joblib"))
-    ap.add_argument("--config", default=str(ROOT / "configs/default.json"))
-    ap.add_argument(
-        "--input",
-        required=True,
-        help="JSONL/JSON/CSV/XLSX with page_id+ocr_text, or a folder of .txt files",
-    )
-    ap.add_argument(
-        "--output",
-        default=str(ROOT / "reports/page_flags.xlsx"),
-        help="Output path (.xlsx default; use .csv for CSV)",
-    )
-    args = ap.parse_args()
+    in_path = Path(INPUT_PATH)
+    out = Path(OUTPUT_PATH)
+    model_path = Path(MODEL_PATH)
+    config_path = Path(CONFIG_PATH)
 
-    in_path = Path(args.input)
-    out = Path(args.output)
     if not in_path.exists():
-        raise SystemExit(f"Input not found: {in_path}")
+        raise SystemExit(
+            f"Input not found: {in_path}\n"
+            f"Edit INPUT_PATH at the top of scripts/infer.py"
+        )
+    if not model_path.exists():
+        raise SystemExit(f"Model not found: {model_path}")
 
-    print(f"Loading model: {args.model}", flush=True)
-    cfg = _load_cfg(Path(args.config))
-    model = FlatClassifier.load(args.model)
+    print(f"Loading model: {model_path}", flush=True)
+    cfg = _load_cfg(config_path)
+    model = FlatClassifier.load(str(model_path))
     service = PageClassifierService(
         model,
         model_version=cfg["model_version"],

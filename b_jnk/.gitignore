@@ -5,12 +5,8 @@ __pycache__/
 .venv/
 venv/
 
-# Training OCR often contains PHI — keep local
-data/raw/keep_sources_v0.3/
-data/raw/keep_paste_v0.3.txt
-data/raw/ehr_pages_v0.3.jsonl
-data/raw/ehr_pages_v0.2.jsonl
-data/raw/*.xlsx
+# Training OCR / workbook dumps often contain PHI — keep local
+data/raw/
 
 # Run outputs
 reports/*.csv

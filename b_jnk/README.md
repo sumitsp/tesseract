@@ -26,56 +26,27 @@ The original label set alone was **not sufficient** (almost no KEEP). Kept under
 ## Layout
 
 ```text
-blank_junk_classifier/
+b_jnk/
 ├── configs/default.json
-├── data/raw/ehr_pages_v0.2.jsonl
+├── data/
 ├── src/
-│   ├── preprocessing/   # load, empty-OCR routing, taxonomy → flags
-│   ├── features/        # OCR stats + TF-IDF
-│   ├── models/          # TF-IDF / embeddings, split, decision layer
-│   ├── evaluation/      # false-flag + missed-drop metrics
-│   ├── explainability/
-│   └── inference/       # page API
 ├── scripts/
-│   ├── dataset_report.py
-│   ├── train_baseline.py
-│   ├── train_embeddings.py
-│   ├── compare_models.py
-│   └── infer.py         # → CSV
+│   └── infer.py         # edit INPUT_PATH / OUTPUT_PATH at top
 ├── models/
 └── reports/
 ```
 
 ## Run on another PC (inference only)
 
-```bash
-git pull
-cd blank_junk_classifier
-pip install -r requirements.txt
-
-# Local OCR input: JSONL/JSON/CSV/XLSX with page_id + ocr_text, OR a folder of .txt
-python scripts/infer.py \
-  --input /path/to/pages.jsonl \
-  --output reports/page_flags.xlsx
-```
-
-Terminal prints each page as it is flagged. Default output is **Excel** (`.xlsx`). Nothing is deleted — flags only.
-
-Required files in this folder: `src/`, `scripts/infer.py`, `configs/default.json`, `models/tfidf_flat.joblib`, `requirements.txt`.
-
-## Commands
+1. `git pull` then `cd b_jnk` and `pip install -r requirements.txt`
+2. Open `scripts/infer.py` and set **`INPUT_PATH`** / **`OUTPUT_PATH`** at the top
+3. Run:
 
 ```bash
-python scripts/dataset_report.py --jsonl data/raw/ehr_pages_v0.3.jsonl --out reports/dataset_quality_v0.3.json
-
-# 2) Train TF-IDF on KEEP / BLANK / JUNK
-python scripts/train_baseline.py
-
-# 3) Flag pages → CSV
-python scripts/infer.py \
-  --input data/raw/ehr_pages_v0.3.jsonl \
-  --output reports/page_flags.csv
+python scripts/infer.py
 ```
+
+Terminal prints each page as it is flagged. Output is **Excel** by default. Nothing is deleted — flags only.
 ## CSV columns
 
 | column | meaning |

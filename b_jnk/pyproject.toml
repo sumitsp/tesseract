@@ -4,9 +4,10 @@
 python_requires = ">=3.10"
 
 [project]
-name = "blank-junk-classifier"
-version = "0.1.0"
-description = "Conservative OCR-text classifier for EHR blank/junk page detection"
+name = "b-jnk"
+version = "0.3.0"
+description = "OCR page flagger: KEEP / BLANK / JUNK (flagging only, no deletes)"
+
 dependencies = [
   "numpy",
   "pandas",
