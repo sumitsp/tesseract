@@ -67,16 +67,23 @@ class PageClassifierService:
         )
         if route.routed:
             hit = analyze_protocol(ocr_text)
+            flag = route.flag
             audit = route.audit_tag or "UNREADABLE_OCR"
+            review = route.review_required
+            # Retention safeguards still win over blank routing
             if hit.retain_clinical_image:
+                flag = "KEEP"
                 audit = "KEEP_CLINICAL_IMAGE"
+                review = False
             elif hit.retain_demographic:
+                flag = "KEEP"
                 audit = "KEEP_DEMOGRAPHIC"
+                review = False
             return InferenceResult(
                 page_id=page_id,
-                flag="KEEP",
+                flag=flag,
                 confidence=route.confidence,
-                review_required=True,
+                review_required=review,
                 audit_tag=audit,
                 top_evidence=route.reason or "empty_or_unreadable_ocr",
                 model_version=self.model_version,

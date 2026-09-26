@@ -422,7 +422,8 @@ def main() -> int:
             page["page_id"],
             page.get("ocr_text", ""),
             content_meta=page.get("content_meta"),
-        )        row = _row_from_result(r)
+        )
+        row = _row_from_result(r)
         rows.append(row)
         ws.append([row.get(c, "") for c in COLUMNS])
         wb.save(out)  # save after every page from the start
