@@ -59,6 +59,7 @@ def _load_cfg(path: Path) -> dict:
 from src.inference.predict import InferenceResult, PageClassifierService  # noqa: E402
 from src.models.classifiers import FlatClassifier  # noqa: E402
 from src.models.decision import DecisionConfig  # noqa: E402
+from src.preprocessing.docling_page import extract_docling_page  # noqa: E402
 
 
 COLUMNS = [
@@ -82,29 +83,28 @@ def _natural_page_key(name: str):
 
 
 def _clean_ocr_text(text: str) -> str:
-    """Normalize Docling markdown / OCR dumps for the text classifier."""
+    """Light normalize for non-Docling dumps (HTML comments / whitespace only)."""
     if not text:
         return ""
     text = text.replace("\u2028", "\n").replace("\u2029", "\n").replace("\xa0", " ")
-    text = re.sub(r"<!--\s*image\s*-->", " ", text, flags=re.I)
-    text = re.sub(r"\[no text detected\]", " ", text, flags=re.I)
-    text = re.sub(r"\[ERROR extracting[^\]]*\]", " ", text, flags=re.I)
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
+def _page_record(page_id: str, page_obj) -> dict:
+    """Docling structure drives emptiness — no hardcoded OCR placeholder strings."""
+    content = extract_docling_page(page_obj)
+    return {
+        "page_id": page_id,
+        "ocr_text": content.text,
+        "content_meta": content.to_meta(),
+    }
+
+
 def _text_from_page_value(value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return _clean_ocr_text(value)
-    if not isinstance(value, dict):
-        return _clean_ocr_text(str(value))
-    for key in ("markdown", "ocr_text", "text", "content", "raw_text"):
-        if value.get(key):
-            return _clean_ocr_text(str(value[key]))
-    return ""
+    return extract_docling_page(value).text
 
 
 def _is_docling_pages_dict(payload: dict) -> bool:
@@ -128,12 +128,12 @@ def _is_docling_pages_dict(payload: dict) -> bool:
     return hits >= 1
 
 
-def _pages_from_docling_dict(payload: dict, *, prefix: str = "") -> list[dict[str, str]]:
+def _pages_from_docling_dict(payload: dict, *, prefix: str = "") -> list[dict]:
     items = sorted(payload.items(), key=lambda kv: _natural_page_key(str(kv[0])))
-    pages: list[dict[str, str]] = []
+    pages: list[dict] = []
     for name, value in items:
         page_id = f"{prefix}{name}" if prefix else str(name)
-        pages.append({"page_id": page_id, "ocr_text": _text_from_page_value(value)})
+        pages.append(_page_record(page_id, value))
     return pages
 
 
@@ -152,17 +152,16 @@ def _pages_from_rapid_txt(text: str, *, prefix: str = "") -> list[dict[str, str]
     return pages
 
 
-def _load_json_file(path: Path, *, prefix: str = "") -> list[dict[str, str]]:
+def _load_json_file(path: Path, *, prefix: str = "") -> list[dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
-        out: list[dict[str, str]] = []
+        out: list[dict] = []
         for i, obj in enumerate(payload):
-            if isinstance(obj, dict) and ("page_id" in obj or "ocr_text" in obj or "markdown" in obj):
+            if isinstance(obj, dict) and ("page_id" in obj or "ocr_text" in obj or "markdown" in obj or "document" in obj):
                 pid = str(obj.get("page_id") or f"page_{i+1}")
-                text = obj.get("ocr_text") or obj.get("markdown") or obj.get("text") or ""
-                out.append({"page_id": f"{prefix}{pid}", "ocr_text": _clean_ocr_text(str(text))})
+                out.append(_page_record(f"{prefix}{pid}", obj))
             else:
-                out.append({"page_id": f"{prefix}page_{i+1}", "ocr_text": _text_from_page_value(obj)})
+                out.append(_page_record(f"{prefix}page_{i+1}", obj))
         return out
 
     if not isinstance(payload, dict):
@@ -180,23 +179,15 @@ def _load_json_file(path: Path, *, prefix: str = "") -> list[dict[str, str]]:
             if not isinstance(obj, dict):
                 continue
             pid = str(obj.get("page_id") or f"page_{i}")
-            text = obj.get("ocr_text") or obj.get("markdown") or obj.get("text") or ""
-            out.append({"page_id": f"{prefix}{pid}", "ocr_text": _clean_ocr_text(str(text))})
+            out.append(_page_record(f"{prefix}{pid}", obj))
         return out
 
     # single-page docling-ish
-    if "markdown" in payload:
-        return [{"page_id": f"{prefix}{path.stem}", "ocr_text": _text_from_page_value(payload)}]
+    if "markdown" in payload or "document" in payload:
+        return [_page_record(f"{prefix}{path.stem}", payload)]
 
     if "page_id" in payload:
-        return [
-            {
-                "page_id": f"{prefix}{payload['page_id']}",
-                "ocr_text": _clean_ocr_text(
-                    str(payload.get("ocr_text") or payload.get("markdown") or "")
-                ),
-            }
-        ]
+        return [_page_record(f"{prefix}{payload['page_id']}", payload)]
 
     raise SystemExit(
         f"{path}: unrecognized JSON shape. Expected Docling map "
@@ -427,8 +418,11 @@ def main() -> int:
     rows: list[dict] = []
     n_keep = n_blank = n_junk = n_review = 0
     for i, page in enumerate(pages, start=1):
-        r = service.predict_one(page["page_id"], page.get("ocr_text", ""))
-        row = _row_from_result(r)
+        r = service.predict_one(
+            page["page_id"],
+            page.get("ocr_text", ""),
+            content_meta=page.get("content_meta"),
+        )        row = _row_from_result(r)
         rows.append(row)
         ws.append([row.get(c, "") for c in COLUMNS])
         wb.save(out)  # save after every page from the start

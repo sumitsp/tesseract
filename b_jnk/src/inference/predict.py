@@ -53,14 +53,21 @@ class PageClassifierService:
         self.decision = decision or DecisionConfig()
         self.min_dictionary_words = min_dictionary_words
 
-    def predict_one(self, page_id: str, ocr_text: str) -> InferenceResult:
+    def predict_one(
+        self,
+        page_id: str,
+        ocr_text: str,
+        *,
+        content_meta: dict[str, Any] | None = None,
+    ) -> InferenceResult:
         route = route_empty_or_unreadable(
-            ocr_text, min_dictionary_words=self.min_dictionary_words
+            ocr_text,
+            min_dictionary_words=self.min_dictionary_words,
+            content_meta=content_meta,
         )
         if route.routed:
             hit = analyze_protocol(ocr_text)
-            # Empty OCR cannot be proven absolute-blank vs clinical image failure
-            audit = "BLANK_ABSOLUTE_CANDIDATE" if route.reason == "empty_ocr" else "UNREADABLE_OCR"
+            audit = route.audit_tag or "UNREADABLE_OCR"
             if hit.retain_clinical_image:
                 audit = "KEEP_CLINICAL_IMAGE"
             elif hit.retain_demographic:
@@ -102,5 +109,12 @@ class PageClassifierService:
             p_junk=round(decision.p_junk, 4),
         )
 
-    def predict_batch(self, pages: list[dict[str, str]]) -> list[InferenceResult]:
-        return [self.predict_one(p["page_id"], p.get("ocr_text", "")) for p in pages]
+    def predict_batch(self, pages: list[dict[str, Any]]) -> list[InferenceResult]:
+        return [
+            self.predict_one(
+                p["page_id"],
+                p.get("ocr_text", ""),
+                content_meta=p.get("content_meta"),
+            )
+            for p in pages
+        ]
