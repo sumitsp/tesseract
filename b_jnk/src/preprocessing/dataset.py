@@ -111,6 +111,10 @@ def load_jsonl(path: Path | str) -> list[PageRecord]:
 def _assert_no_label_conflicts(rows: Iterable[PageRecord]) -> None:
     by_hash: dict[str, set[str]] = {}
     for r in rows:
+        # Empty OCR is identical across absolute blanks / unknown review pages —
+        # allow multiple labels (routing decides at inference).
+        if not (r.ocr_text or "").strip():
+            continue
         by_hash.setdefault(r.text_hash or "", set()).add(r.primary_class)
     conflicts = {h: cs for h, cs in by_hash.items() if h and len(cs) > 1}
     if conflicts:
