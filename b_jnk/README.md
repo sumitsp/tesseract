@@ -39,8 +39,8 @@ b_jnk/
 ## Run on another PC (inference only)
 
 1. `git pull` then `cd b_jnk` and `pip install -r requirements.txt`
-2. Open `scripts/infer.py` and set **`INPUT_PATH`** / **`OUTPUT_PATH`** at the top  
-   (`INPUT_PATH` can be a Docling+RapidOCR folder/JSON or RapidOCR `.txt`)
+2. Open `scripts/infer.py` and set **`INPUT_PATH`** only  
+   (Excel is auto-saved in that same folder as `page_flags.xlsx`, updated after every page)
 3. Run:
 
 ```bash

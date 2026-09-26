@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Flag local OCR pages as KEEP / BLANK / JUNK → Excel (nothing is deleted).
 
-Edit INPUT_PATH / OUTPUT_PATH below, then run:
+Edit INPUT_PATH below, then run:
   python scripts/infer.py
+
+Excel is saved next to the input (same folder) and written from the start —
+updated after every page so you don't wait until the end.
 
 Supports:
   - Docling+RapidOCR JSON: {"1.jpg": {"markdown": "...", "document": {...}}, ...}
@@ -14,7 +17,7 @@ Prints progress to the terminal while processing.
 """
 
 from __future__ import annotations
- 
+
 import csv
 import json
 import re
@@ -26,18 +29,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # ---------------------------------------------------------------------------
-# Edit these paths for your machine (no CLI args needed)
+# Edit this path only — Excel is saved in the same folder as INPUT_PATH
 # ---------------------------------------------------------------------------
-# Docling+RapidOCR JSON from pipeline/os_ocr.py (one file or a folder of charts)
 INPUT_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling")
 # Examples:
 # INPUT_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling\52743839_44976074\52743839_44976074.json")
 # INPUT_PATH = Path.home() / "Desktop" / "Imaging" / "docling_format_and_rapid"
-# INPUT_PATH = Path.home() / "Desktop" / "Imaging" / "rapid"   # RapidOCR ===== .txt dumps
 # INPUT_PATH = ROOT / "data" / "samples" / "sample_pages.jsonl"
-
-OUTPUT_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\page_flags.xlsx")
-# OUTPUT_PATH = ROOT / "reports" / "page_flags.xlsx"
 
 MODEL_PATH = ROOT / "models" / "tfidf_flat.joblib"
 CONFIG_PATH = ROOT / "configs" / "default.json"
@@ -321,6 +319,13 @@ def _row_from_result(r: InferenceResult) -> dict:
     return {k: row.get(k, "") for k in COLUMNS}
 
 
+def _output_path_from_input(in_path: Path) -> Path:
+    """Excel always lives next to the input you started with."""
+    if in_path.is_dir():
+        return in_path / "page_flags.xlsx"
+    return in_path.with_name(f"{in_path.stem}_page_flags.xlsx")
+
+
 def _write_excel(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -353,7 +358,7 @@ def _write_excel(path: Path, rows: list[dict]) -> None:
     except Exception as exc:
         raise SystemExit(
             "Excel output needs openpyxl (pip install openpyxl).\n"
-            "Or set OUTPUT_PATH to a .csv file"
+            "Or install openpyxl in the venv."
         ) from exc
 
 
@@ -365,9 +370,28 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _open_excel_writer(path: Path):
+    """Create Excel at start (header only); caller appends + saves per page."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError as exc:
+        raise SystemExit("Excel needs openpyxl: pip install openpyxl") from exc
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "page_flags"
+    ws.append(COLUMNS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    wb.save(path)
+    return wb, ws
+
+
 def main() -> int:
     in_path = Path(INPUT_PATH)
-    out = Path(OUTPUT_PATH)
+    out = _output_path_from_input(in_path)
     model_path = Path(MODEL_PATH)
     config_path = Path(CONFIG_PATH)
 
@@ -394,13 +418,19 @@ def main() -> int:
     total = len(pages)
     if total == 0:
         raise SystemExit("No pages found in input")
+
+    print(f"Excel (from start): {out}", flush=True)
+    wb, ws = _open_excel_writer(out)
     print(f"Flagging {total} pages…", flush=True)
 
     rows: list[dict] = []
     n_keep = n_blank = n_junk = n_review = 0
     for i, page in enumerate(pages, start=1):
         r = service.predict_one(page["page_id"], page.get("ocr_text", ""))
-        rows.append(_row_from_result(r))
+        row = _row_from_result(r)
+        rows.append(row)
+        ws.append([row.get(c, "") for c in COLUMNS])
+        wb.save(out)  # save after every page from the start
         if r.flag == "KEEP":
             n_keep += 1
         elif r.flag == "BLANK":
@@ -412,14 +442,12 @@ def main() -> int:
         review = " review" if r.review_required else ""
         print(
             f"[{i}/{total}] {r.page_id} → {r.flag} "
-            f"(conf={r.confidence:.3f}{review})",
+            f"(conf={r.confidence:.3f}{review}) | saved",
             flush=True,
         )
 
-    if out.suffix.lower() in {".xlsx", ".xlsm"}:
-        _write_excel(out, rows)
-    else:
-        _write_csv(out, rows)
+    # final polish (filter + column widths)
+    _write_excel(out, rows)
 
     print(
         f"Done. Wrote {total} rows → {out}\n"
