@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Flag local OCR pages as KEEP / BLANK / JUNK → Excel (nothing is deleted).
 
-Edit INPUT_PATH below, then run:
+Edit RUN CONFIG below, then run:
   python scripts/infer.py
 
-Excel is saved next to the input (same folder) and written from the start —
+Input comes from a local file/folder (INPUT_SOURCE = "local") or from Azure Blob
+chart folders under PREFIX (INPUT_SOURCE = "blob"). Excel is saved next to
+LOCAL_INPUT, or in OUTPUT_DIR for blob runs, and written from the start —
 updated after every page so you don't wait until the end.
 
 Supports:
   - Docling+RapidOCR JSON: {"1.jpg": {"markdown": "...", "document": {...}}, ...}
   - RapidOCR .txt: ===== 1.jpg =====\\n text ...
-  - Folder of those files / chart subfolders
-  - JSONL/CSV/XLSX with page_id + ocr_text
+  - Folder of those files / chart subfolders (local or blob)
+  - JSONL/CSV/XLSX with page_id + ocr_text (local only)
 
 Prints progress to the terminal while processing.
 """
@@ -29,14 +31,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-# ---------------------------------------------------------------------------
-# Edit this path only — Excel is saved in the same folder as INPUT_PATH
-# ---------------------------------------------------------------------------
-INPUT_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling")
+# ============================================================
+# RUN CONFIG — edit these (no .env)
+# ============================================================
+
+INPUT_SOURCE = "local"  # "local" or "blob"
+
+# Local input (used when INPUT_SOURCE == "local") — Excel is saved next to it
+LOCAL_INPUT = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling")
 # Examples:
-# INPUT_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling\52743839_44976074\52743839_44976074.json")
-# INPUT_PATH = Path.home() / "Desktop" / "Imaging" / "docling_format_and_rapid"
-# INPUT_PATH = ROOT / "data" / "samples" / "sample_pages.jsonl"
+# LOCAL_INPUT = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling\52743839_44976074\52743839_44976074.json")
+# LOCAL_INPUT = Path.home() / "Desktop" / "Imaging" / "docling_format_and_rapid"
+# LOCAL_INPUT = ROOT / "data" / "samples" / "sample_pages.jsonl"
+
+# Azure Blob (used when INPUT_SOURCE == "blob"): <PREFIX>/<chart>/<chart>.json or .txt
+STORAGE_ACCOUNT = "azsadve2aipoc"
+CONTAINER_NAME = "YOUR_CONTAINER_NAME"
+PREFIX = "Run1/Batch1/extracted_text_docling/"
+# Start at this chart folder, then continue with later folders ("" = all).
+START_FROM = ""
+# Excel for blob runs is written here as page_flags.xlsx
+OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\page_flags")
 
 MODEL_PATH = ROOT / "models" / "tfidf_flat.joblib"
 # Used instead of MODEL_PATH when present and torch + transformers are installed
@@ -46,6 +61,7 @@ CONFIG_PATH = ROOT / "configs" / "default.json"
 
 PAGE_SPLIT_TXT = re.compile(r"=====+\s*([^\n=]+?)\s*=====+")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".pdf"}
+OCR_SUFFIXES = {".json", ".txt"}
 
 
 def _load_cfg(path: Path) -> dict:
@@ -159,7 +175,11 @@ def _pages_from_rapid_txt(text: str, *, prefix: str = "") -> list[dict[str, str]
 
 
 def _load_json_file(path: Path, *, prefix: str = "") -> list[dict]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    return _pages_from_json_text(path.read_text(encoding="utf-8"), name=str(path), prefix=prefix)
+
+
+def _pages_from_json_text(text: str, *, name: str, prefix: str = "") -> list[dict]:
+    payload = json.loads(text)
     if isinstance(payload, list):
         out: list[dict] = []
         for i, obj in enumerate(payload):
@@ -171,7 +191,7 @@ def _load_json_file(path: Path, *, prefix: str = "") -> list[dict]:
         return out
 
     if not isinstance(payload, dict):
-        raise SystemExit(f"{path}: JSON must be an object or list")
+        raise SystemExit(f"{name}: JSON must be an object or list")
 
     if _is_docling_pages_dict(payload):
         return _pages_from_docling_dict(payload, prefix=prefix)
@@ -190,15 +210,85 @@ def _load_json_file(path: Path, *, prefix: str = "") -> list[dict]:
 
     # single-page docling-ish
     if "markdown" in payload or "document" in payload:
-        return [_page_record(f"{prefix}{path.stem}", payload)]
+        return [_page_record(f"{prefix}{Path(name).stem}", payload)]
 
     if "page_id" in payload:
         return [_page_record(f"{prefix}{payload['page_id']}", payload)]
 
     raise SystemExit(
-        f"{path}: unrecognized JSON shape. Expected Docling map "
+        f"{name}: unrecognized JSON shape. Expected Docling map "
         '{"1.jpg": {"markdown": "...", "document": {...}}}'
     )
+
+
+def _connect_container():
+    from azure.identity import DefaultAzureCredential
+    from azure.storage.blob import BlobServiceClient
+
+    print("Connecting to Azure Blob Storage...", flush=True)
+    account_url = f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
+    try:
+        client = BlobServiceClient(account_url=account_url, credential=DefaultAzureCredential())
+        return client.get_container_client(CONTAINER_NAME)
+    except Exception as exc:
+        raise SystemExit(f"ERROR connecting to Azure:\n{exc}") from exc
+
+
+def _blob_prefix() -> str:
+    prefix = PREFIX.strip()
+    if prefix and not prefix.endswith("/") and Path(prefix).suffix.lower() not in OCR_SUFFIXES:
+        prefix += "/"
+    return prefix
+
+
+def _list_ocr_blobs(container, prefix: str) -> list[str]:
+    """OCR blob names under prefix; per chart folder, Docling JSON is preferred over .txt."""
+    try:
+        names = [
+            b.name for b in container.list_blobs(name_starts_with=prefix)
+            if Path(b.name).suffix.lower() in OCR_SUFFIXES
+        ]
+    except Exception as exc:
+        raise SystemExit(f"ERROR while reading blobs:\n{exc}") from exc
+
+    def folder(name: str) -> str:
+        rel = name[len(prefix):]
+        return rel.split("/")[0] if "/" in rel else ""
+
+    has_json = {folder(n) for n in names if n.lower().endswith(".json")}
+    names = [n for n in names if n.lower().endswith(".json") or folder(n) not in has_json]
+    folders = sorted({folder(n) for n in names}, key=str.lower)
+    if START_FROM:
+        if START_FROM not in folders:
+            raise SystemExit(f"START_FROM folder not found under prefix: {START_FROM}")
+        idx = folders.index(START_FROM)
+        print(f"Starting at {START_FROM}; skipping {idx} earlier folder(s)", flush=True)
+        keep = set(folders[idx:])
+        names = [n for n in names if folder(n) in keep]
+    return sorted(names, key=lambda n: (folder(n).lower(), _natural_page_key(n)))
+
+
+def _load_blob_pages() -> list[dict]:
+    if not CONTAINER_NAME or CONTAINER_NAME == "YOUR_CONTAINER_NAME":
+        raise SystemExit("Set STORAGE_ACCOUNT, CONTAINER_NAME and PREFIX in RUN CONFIG of scripts/infer.py")
+    prefix = _blob_prefix()
+    print(f"Reading input: azure://{STORAGE_ACCOUNT}/{CONTAINER_NAME}/{prefix}", flush=True)
+    container = _connect_container()
+    pages: list[dict] = []
+    for name in _list_ocr_blobs(container, prefix):
+        text = container.download_blob(name).readall().decode("utf-8", errors="replace")
+        rel = name[len(prefix):] or Path(name).name
+        parent = Path(rel).parent
+        page_prefix = f"{parent.as_posix()}/" if parent != Path(".") else ""
+        if name.lower().endswith(".json"):
+            if not text.lstrip().startswith("{"):
+                continue
+            chunk = _pages_from_json_text(text, name=name, prefix=page_prefix)
+        else:
+            chunk = _pages_from_rapid_txt(text, prefix=page_prefix)
+        print(f"  loaded {len(chunk)} pages from {rel}", flush=True)
+        pages.extend(chunk)
+    return pages
 
 
 def _load_pages(path: Path) -> list[dict[str, str]]:
@@ -388,16 +478,22 @@ def _open_excel_writer(path: Path):
 
 
 def main() -> int:
-    in_path = Path(INPUT_PATH)
-    out = _output_path_from_input(in_path)
+    source = INPUT_SOURCE.strip().lower()
+    if source not in {"local", "blob"}:
+        raise SystemExit(f'INPUT_SOURCE must be "local" or "blob", got: {INPUT_SOURCE!r}')
+    in_path = Path(LOCAL_INPUT).expanduser()
+    if source == "blob":
+        out = Path(OUTPUT_DIR).expanduser() / "page_flags.xlsx"
+    else:
+        if not in_path.exists():
+            raise SystemExit(
+                f"Input not found: {in_path}\n"
+                f"Edit LOCAL_INPUT at the top of scripts/infer.py"
+            )
+        out = _output_path_from_input(in_path)
     model_path = Path(MODEL_PATH)
     config_path = Path(CONFIG_PATH)
 
-    if not in_path.exists():
-        raise SystemExit(
-            f"Input not found: {in_path}\n"
-            f"Edit INPUT_PATH at the top of scripts/infer.py"
-        )
     cfg = _load_cfg(config_path)
     model = None
     model_version = cfg["model_version"]
@@ -426,8 +522,11 @@ def main() -> int:
         route_short_pages=route_short_pages,
     )
 
-    print(f"Reading input: {in_path}", flush=True)
-    pages = _load_pages(in_path)
+    if source == "blob":
+        pages = _load_blob_pages()
+    else:
+        print(f"Reading input: {in_path}", flush=True)
+        pages = _load_pages(in_path)
     total = len(pages)
     if total == 0:
         raise SystemExit("No pages found in input")

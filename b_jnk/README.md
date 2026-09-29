@@ -31,7 +31,7 @@ b_jnk/
 ├── data/
 ├── src/
 ├── scripts/
-│   └── infer.py         # edit INPUT_PATH / OUTPUT_PATH at top
+│   └── infer.py         # edit RUN CONFIG at top (local or blob input)
 ├── models/
 └── reports/
 ```
@@ -39,8 +39,10 @@ b_jnk/
 ## Run on another PC (inference only)
 
 1. `git pull` then `cd b_jnk` and `pip install -r requirements.txt`
-2. Open `scripts/infer.py` and set **`INPUT_PATH`** only  
-   (Excel is auto-saved in that same folder as `page_flags.xlsx`, updated after every page)
+2. Open `scripts/infer.py` and edit **RUN CONFIG**:
+   - local: `INPUT_SOURCE = "local"` and `LOCAL_INPUT` (Excel is auto-saved in that same folder as `page_flags.xlsx`)
+   - blob: `INPUT_SOURCE = "blob"`, `CONTAINER_NAME`, `PREFIX` (chart folders of `.json`/`.txt`), optional `START_FROM`; Excel goes to `OUTPUT_DIR/page_flags.xlsx`  
+   Excel is updated after every page.
 3. Run:
 
 ```bash
