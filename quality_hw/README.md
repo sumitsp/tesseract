@@ -4,8 +4,10 @@ Page quality + printed/handwritten classification only. No rotation, tilt, mirro
 
 For every page it reports:
 
-- **Quality score** (0-10) with Good/Bad (Bad below `QUALITY_REVIEW_THRESHOLD`, default 4.0), the 10 submetrics and warnings (low DPI, blur, low contrast, ...).
-- **Document type**: `PRINTED`, `HANDWRITTEN`, `BLANK` or `UNCERTAIN`, from the latest ConvNeXt-Tiny page model (`models/page_printed_handwritten_convnext_tiny.pth`) plus handwriting ink evidence that upgrades filled-in forms to HANDWRITTEN.
+- **Quality score** (0-10) with Good/Medium/Bad (Bad below `QUALITY_REVIEW_THRESHOLD`, default 4.0), the 10 submetrics and warnings (low DPI, blur, low contrast, ...). A HANDWRITTEN page that would be Good is reported as Medium; its score is unchanged. BLANK pages get `N/A` (there is no content to judge).
+- **Document type**: `PRINTED`, `HANDWRITTEN`, `BLANK` or `UNCERTAIN`.
+  - Blank is decided before the model: stroke-sized marks are measured against the local paper brightness, so scanner noise, grey paper, borders and punch holes do not count. No marks → `BLANK` (`blank_page`). Only faint marks (pencil or show-through from the back) → `UNCERTAIN` (`faint_marks_only`) for review.
+  - Pages with marks go to the latest ConvNeXt-Tiny page model (`models/page_printed_handwritten_convnext_tiny.pth`) plus handwriting ink evidence that upgrades filled-in forms to HANDWRITTEN.
 - **Final status**: `REVIEW_REQUIRED` if quality is Bad or the type is UNCERTAIN, `ERROR` if the page failed, otherwise `OK`.
 
 Inputs: JPG, PNG, TIFF (multi-page), BMP, GIF, WEBP, PNM and PDF, from a local folder or Azure Blob.

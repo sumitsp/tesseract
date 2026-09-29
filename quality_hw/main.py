@@ -1,6 +1,6 @@
 """Page quality + printed/handwritten pipeline.
 
-For every page: engineering quality score (0-10, Good/Bad) and document type
+For every page: engineering quality score (0-10, Good/Medium/Bad) and document type
 (PRINTED / HANDWRITTEN / BLANK / UNCERTAIN) from the ConvNeXt-Tiny page model
 plus handwriting ink evidence. Results go to a live CSV report.
 
@@ -91,8 +91,18 @@ def process_page(page: Page, bundle: dict[str, Any]) -> dict[str, Any]:
             "Document Type Method": dt.method,
             "Error": dt.error,
         })
+        if doc_type == "BLANK":
+            # Sharpness/contrast of an empty sheet say nothing about readability.
+            row["Quality"] = "N/A"
+            bad = False
         review = bad or doc_type == "UNCERTAIN" or dt.error
         row["Final Status"] = "REVIEW_REQUIRED" if review else "OK"
+
+        # Handwriting OCRs worse than print, so a clean handwritten page tops out at Medium.
+        if doc_type == "HANDWRITTEN" and row["Quality"] == "Good":
+            row["Quality"] = "Medium"
+            note = "QUALITY_MEDIUM: handwritten page capped from Good"
+            row["Quality Warning"] = "; ".join(filter(None, [row["Quality Warning"], note]))
     except Exception as exc:
         LOGGER.exception("Failed on %s/%s page %s", page.folder, page.file_name, page.page_number)
         row.update({"Final Status": "ERROR", "Error": f"{type(exc).__name__}: {exc}"})

@@ -40,9 +40,18 @@ INK_SCORE_THRESHOLD = 0.48
 INK_TALL_COMPONENT_MIN = 8
 INK_MIN_Y_SPAN_FRAC = 0.22
 INK_MIN_Y_STD = 55.0
-# ConvNeXt was not trained on empty sheets and often predicts HANDWRITTEN.
-BLANK_INK_RATIO_MAX = 0.004
+# ConvNeXt was not trained on empty sheets and predicts HANDWRITTEN on scanner
+# noise, so pages without marks never reach it.
+# Marks are measured at ~150 DPI. Anything wider than PAPER_KERNEL (~4 mm) is paper,
+# scanner border, punch hole or shading, never a pen stroke.
+MARKS_LONG_SIDE = 1650
+PAPER_KERNEL = 25
+MARK_MIN_AREA = 6
+FAINT_RATIO = 0.75  # pixel at most 75% of local paper brightness: a mark
+STRONG_RATIO = 0.50  # at most 50%: dark ink (pen, print), not pencil or show-through
+BLANK_MAX_FRACTION = 1e-4  # a page number or a stray dot, not content
 BLANK_METHOD = "blank_page"
+FAINT_METHOD = "faint_marks_only"
 
 
 def letterbox_rgb(image: Image.Image, fill=(255, 255, 255)) -> Image.Image:
@@ -54,15 +63,35 @@ def letterbox_rgb(image: Image.Image, fill=(255, 255, 255)) -> Image.Image:
     return canvas
 
 
-def page_ink_ratio(image_bgr: np.ndarray) -> float:
-    """Fraction of dark (ink-like) pixels after Otsu; used for blank detection."""
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thr = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    ink = float(np.mean(thr == 0))
-    if thr.mean() < 127:
-        ink = 1.0 - ink
-    return ink
+def page_marks(image_bgr: np.ndarray) -> dict[str, float | int]:
+    """Stroke-sized marks on the page, relative to the local paper brightness.
+
+    Returns the number of marks, the page fraction they cover (``mark_fraction``)
+    and the fraction that is dark ink (``strong_fraction``).
+    """
+    gray = image_bgr if image_bgr.ndim == 2 else cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    scale = MARKS_LONG_SIDE / float(max(gray.shape))
+    gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    kernel = np.ones((PAPER_KERNEL, PAPER_KERNEL), np.uint8)
+    paper = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel).astype(np.float32)
+    ratio = gray.astype(np.float32) / (paper + 1.0)
+    dark_area = (paper < 0.5 * float(np.median(paper))).astype(np.uint8)
+    # Edges of borders and punch holes are not marks either.
+    near_dark = cv2.dilate(dark_area, kernel) > 0
+    candidate = ((ratio < FAINT_RATIO) & ~near_dark).astype(np.uint8)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    h, w = gray.shape
+    x, y, ww, hh, area = (stats[:, i] for i in range(5))
+    good = (area >= MARK_MIN_AREA) & (x > 0) & (y > 0) & (x + ww < w) & (y + hh < h)
+    good[0] = False
+    marks = good[labels]
+    total = float(h * w)
+    return {
+        "marks": int(good.sum()),
+        "mark_fraction": float(marks.sum()) / total,
+        "strong_fraction": float((marks & (ratio < STRONG_RATIO)).sum()) / total,
+    }
 
 
 def handwriting_ink_evidence(image_bgr: np.ndarray) -> dict[str, float | int]:
@@ -217,13 +246,16 @@ def classify_page_convnext(
     bundle: dict[str, Any] | None = None,
 ) -> PageTypeResult:
     try:
-        ink_r = page_ink_ratio(image_bgr)
-        if ink_r < BLANK_INK_RATIO_MAX:
+        content = page_marks(image_bgr)
+        if content["strong_fraction"] < BLANK_MAX_FRACTION:
+            blank = content["mark_fraction"] < BLANK_MAX_FRACTION
             return PageTypeResult(
                 document_type="UNCERTAIN",
-                method=BLANK_METHOD,
-                p_handwritten=0.0,
-                region_labels={"blank": 1, "ink_ratio": ink_r},
+                # Faint-only pages are pencil or show-through; a person has to look.
+                method=BLANK_METHOD if blank else FAINT_METHOD,
+                p_handwritten=None,
+                region_count=int(content["marks"]),
+                region_labels=content,
             )
         model_bundle = bundle if bundle is not None else load_page_classifier()
         tensor = _preprocess(image_bgr, model_bundle).to(model_bundle["device"])
@@ -268,7 +300,7 @@ def classify_page_hybrid(
     """Page ConvNeXt first; ink evidence upgrades filled forms to HANDWRITTEN."""
     model_bundle = bundle if bundle is not None else load_hybrid_classifier()
     page = classify_page_convnext(image_bgr, bundle=model_bundle)
-    if page.error or page.document_type == "HANDWRITTEN" or page.method == BLANK_METHOD:
+    if page.error or page.document_type == "HANDWRITTEN" or page.method in {BLANK_METHOD, FAINT_METHOD}:
         return page
 
     ink = handwriting_ink_evidence(image_bgr)
