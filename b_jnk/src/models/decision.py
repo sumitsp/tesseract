@@ -26,15 +26,16 @@ class DecisionConfig:
     keep_veto_prob: float = 0.10
     # Protocol: never allow JUNK/BLANK when retention signals fire
     enforce_retention_safeguards: bool = True
-    # Request / instructions / fax sheets quote a patient's DOB or MRN; the model may
-    # overrule demographic retention for these labels when very sure AND the page
-    # carries a trigger phrase of that same subtype (confidence alone did not separate
-    # an EMR index page from real request letters). Clinical-image retention is never
-    # overruled.
+    # Request, instructions, fax, and billing sheets quote a patient's DOB or MRN;
+    # the model may overrule demographic retention for these labels when very sure
+    # AND the page carries a trigger phrase of that same subtype (confidence alone
+    # did not separate an EMR index page from real request letters). Clinical-image
+    # retention is never overruled.
     demographic_override_labels: tuple[str, ...] = (
         "JUNK_RECORD_REQUEST",
         "JUNK_INSTRUCTIONS",
         "JUNK_LETTER_FAX",
+        "JUNK_INVOICE",
     )
     demographic_override_min_prob: float = 0.95
     demographic_override_needs_trigger: bool = True

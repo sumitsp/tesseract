@@ -13,6 +13,7 @@ from src.preprocessing.page_subclass import (
     JUNK_SUBTYPES,
     assign_blank_subtype,
     assign_junk_subtype,
+    invoice_page_reason,
     junk_trigger_groups,
 )
 from src.preprocessing.protocol import analyze_protocol
@@ -107,7 +108,13 @@ class PageClassifierService:
                 audit = "KEEP_DEMOGRAPHIC"
                 # Gibberish that happens to contain "dob" is not a real face sheet.
                 review = route.reason == "gibberish_ocr"
-            if route.reason == "gibberish_ocr" and flag == "JUNK":
+            invoice_reason = None if hit.retain_clinical_image else invoice_page_reason(ocr_text)
+            if invoice_reason:
+                flag = "JUNK"
+                audit = "JUNK_INVOICE"
+                review = True
+                subclass, subclass_reason = "JUNK_INVOICE", f"rule:{invoice_reason}"
+            elif route.reason == "gibberish_ocr" and flag == "JUNK":
                 subclass, subclass_reason = "JUNK_OTHERS", "gibberish"
             else:
                 subclass, subclass_reason = _subclass(
@@ -122,9 +129,9 @@ class PageClassifierService:
                 confidence=route.confidence,
                 review_required=review,
                 audit_tag=audit,
-                top_evidence=route.reason or "empty_or_unreadable_ocr",
+                top_evidence=(f"invoice_rule:{invoice_reason}" if invoice_reason else route.reason) or "empty_or_unreadable_ocr",
                 model_version=self.model_version,
-                decision_reason=f"pre_model_route:{route.reason}",
+                decision_reason=f"invoice_rule:{invoice_reason}" if invoice_reason else f"pre_model_route:{route.reason}",
                 subclass=subclass,
                 subclass_reason=subclass_reason,
             )
@@ -145,23 +152,38 @@ class PageClassifierService:
 
         review = decision.review_required
         reason = decision.reason
-        if decision.flag == "KEEP" and not review:
+        flag = decision.flag
+        if flag == "KEEP" and not review:
             hits = junk_trigger_groups(ocr_text)
             if hits:
                 review = True
                 reason = f"{reason}+junk_trigger_review"
                 evidence = [f"junk_trigger:{h}" for h in hits] + evidence
 
+        # Invoice / billing rule. A clinical image is never marked junk.
+        invoice_reason = None
+        if not analyze_protocol(ocr_text).retain_clinical_image:
+            invoice_reason = invoice_page_reason(ocr_text)
+        if invoice_reason and flag != "JUNK":
+            flag = "JUNK"
+            review = True
+            reason = f"{reason}+invoice_rule"
+            evidence = [f"invoice_rule:{invoice_reason}"] + evidence
+
         model_tag = _best_junk_label(labels, proba) or decision.audit_tag
-        subclass, subclass_reason = _subclass(
-            decision.flag, ocr_text, model_tag=model_tag, structurally_empty=False
-        )
+        if invoice_reason:
+            subclass, subclass_reason = "JUNK_INVOICE", f"rule:{invoice_reason}"
+        else:
+            subclass, subclass_reason = _subclass(
+                flag, ocr_text, model_tag=model_tag, structurally_empty=False
+            )
+        audit = "JUNK_INVOICE" if invoice_reason else (decision.audit_tag or flag)
         return InferenceResult(
             page_id=page_id,
-            flag=decision.flag,
+            flag=flag,
             confidence=round(decision.confidence, 4),
             review_required=review,
-            audit_tag=decision.audit_tag or decision.flag,
+            audit_tag=audit,
             top_evidence="; ".join(evidence[:8]),
             model_version=self.model_version,
             decision_reason=reason,

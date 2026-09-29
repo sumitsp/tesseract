@@ -1,8 +1,9 @@
 """JUNK / BLANK subclass rules shared by synthetic-data checking, training and inference.
 
-The model decides KEEP vs BLANK vs JUNK. These rules only name the subtype of a
+The model decides KEEP vs BLANK vs JUNK. These rules name the subtype of a
 page that is already BLANK or JUNK, so training labels and inference subtypes
-always agree. When a page carries triggers of several subtypes, its main
+always agree. The invoice rule is the exception: one strong billing phrase,
+or two weak ones, marks the page JUNK_INVOICE. When a page carries triggers of several subtypes, its main
 purpose wins: the subtype named first in the page heading, else the one with
 the most triggers. The typology list order (Invoice, Cover Page, Record
 Request, Instructions, Letter/Fax, Others) only breaks exact ties.
@@ -32,7 +33,7 @@ SHORT_PAGE_MAX_WORDS = 19
 HEADING_WORDS = 30
 
 INVOICE_STRONG = (
-    "invoice", "superbill", "billing statement", "statement of account", "remittance",
+    "invoice", "superbill", "billing statement", "billing", "statement of account", "remittance",
     "amount due", "balance due", "total due", "payment due",
 )
 INVOICE_WEAK = (
@@ -85,9 +86,23 @@ MODEL_TAG_TO_SUBTYPE: dict[str, str] = {
 }
 
 
+def _ci_token(token: str) -> str:
+    """Case-insensitive token, without re.I, so a case-change boundary stays meaningful."""
+    parts: list[str] = []
+    for char in token:
+        if char.isalpha():
+            parts.append(f"[{re.escape(char.lower())}{re.escape(char.upper())}]")
+        else:
+            parts.append(re.escape(char))
+    return "".join(parts)
+
+
 def _phrase_re(phrase: str) -> re.Pattern[str]:
     # Word-start match; trailing letters allowed ("invoiced", "accepted").
-    return re.compile(r"(?<![a-z0-9])" + r"\s+".join(map(re.escape, phrase.split())), re.I)
+    # A lowercase letter running into an uppercase letter is also a word start.
+    # OCR often glues the patient name to the next heading ("NameHEADING").
+    body = r"\s+".join(_ci_token(token) for token in phrase.split())
+    return re.compile(r"(?:(?<![A-Za-z0-9])|(?<=[a-z])(?=[A-Z]))" + body)
 
 
 MATCHERS: dict[str, re.Pattern[str]] = {
@@ -140,6 +155,22 @@ def _candidate_hits(text: str) -> dict[str, list[str]]:
         if groups[s]:
             out[s] = groups[s]
     return out
+
+
+def invoice_page_reason(text: str) -> str | None:
+    """Invoice / billing rule.
+
+    One strong phrase is enough: invoice, billing, billing statement, superbill,
+    statement of account, remittance, amount due, balance due, total due,
+    payment due. Two of the weaker phrases are required together. The word
+    billing by itself inside a clinical note is not a bill.
+    """
+    hits = _candidate_hits(text).get("JUNK_INVOICE")
+    if not hits:
+        return None
+    if set(hits) <= {"billing"} and CLINICAL_SECTION_RE.search(text or ""):
+        return None
+    return hits[0]
 
 
 def junk_trigger_groups(text: str) -> list[str]:
