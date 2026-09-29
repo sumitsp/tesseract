@@ -24,6 +24,7 @@ models/*.tmp
 # Synthetic prompts / checked output are regenerable; the combined file duplicates synthetic/raw.
 !models/bert_page/model.safetensors
 models/bert_page.tmp/
+synthetic/raw/
 synthetic/prompts/
 synthetic/checked/
 synthetic/synthetic_all_*.jsonl
