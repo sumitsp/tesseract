@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Training data</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.4 system-ui, sans-serif; color: #1a1a1a;
+    background: #e8e8e8; height: 100vh; display: flex; flex-direction: column;
+  }
+  header, footer { background: #fff; padding: 10px 16px; border-bottom: 1px solid #ddd; }
+  footer { border-bottom: 0; border-top: 1px solid #ddd; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  .muted { color: #555; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; }
+  #page { max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.18); }
+  #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+  button, select, input {
+    font: inherit; padding: 7px 12px; border: 1px solid #bbb; border-radius: 6px; background: #fff;
+  }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.hw { background: #f3e6c4; }
+  button.pr { background: #d9e6f5; }
+  .chip { font-weight: 650; padding: 2px 8px; border-radius: 99px; }
+  .chip.hw { background: #f3e6c4; }
+  .chip.pr { background: #d9e6f5; }
+  .chip.none { background: #eee; color: #555; font-weight: 500; }
+  #toast { min-height: 1.2em; }
+  .err { color: #9b1c1c; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="where">Training data</h1>
+    <div class="muted" id="progress"></div>
+  </div>
+  <div>Current label: <span id="chip" class="chip none">—</span></div>
+</header>
+<div id="stage">
+  <div id="status">Reading folders from blob…</div>
+  <img id="page" alt="" hidden>
+</div>
+<footer>
+  <button type="button" id="back" class="hw" disabled>Back</button>
+  <button type="button" id="prev-folder" disabled>Previous folder</button>
+  <button type="button" id="hand" class="hw" disabled>Handwritten (A)</button>
+  <button type="button" id="print" class="pr" disabled>Printed (Space)</button>
+  <button type="button" id="next" disabled>Next</button>
+  <label>Folder <select id="jump-folder" disabled></select></label>
+  <label>Image <select id="jump-image" disabled></select></label>
+  <button type="button" id="jump" disabled>Go</button>
+  <label>Number <input id="jump-n" type="number" min="1" step="1" style="width:7em" disabled></label>
+  <button type="button" id="jump-num" disabled>Go to number</button>
+  <span id="toast" class="muted"></span>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const page = $("page");
+let meta = null;
+let item = null;
+let index = 0;
+let busy = false;
+let imageReady = false;
+
+function toast(text, isError) {
+  $("toast").textContent = text || "";
+  $("toast").className = isError ? "err" : "muted";
+}
+
+function setChip(value) {
+  const chip = $("chip");
+  chip.textContent = value || "not labeled";
+  chip.className = "chip " + (value === "Handwritten" ? "hw" : value === "Printed" ? "pr" : "none");
+}
+
+function buttons(on) {
+  const atStart = !meta || index <= 0;
+  const atEnd = !meta || index >= meta.total - 1;
+  const firstFolder = !item || item.folder_number <= 1;
+  $("back").disabled = !on || atStart;
+  $("next").disabled = !on || atEnd;
+  $("prev-folder").disabled = !on || firstFolder;
+  $("hand").disabled = !on;
+  $("print").disabled = !on;
+  $("jump").disabled = !on;
+  $("jump-num").disabled = !on;
+  $("jump-folder").disabled = !on;
+  $("jump-n").disabled = !on;
+  $("jump-image").disabled = !on || !$("jump-folder").value;
+}
+
+async function loadMeta() {
+  const res = await fetch("/api/meta");
+  const body = await res.json();
+  if (!body.ready) return false;
+  if (body.error) {
+    $("status").textContent = body.error;
+    $("status").hidden = false;
+    return true;
+  }
+  meta = body;
+  const saved = Number(localStorage.getItem("tdc_index"));
+  const start = Number.isInteger(saved) && saved >= 0 && saved < meta.total ? saved : meta.resume_index;
+  fillFolders();
+  await show(start);
+  return true;
+}
+
+function fillFolders() {
+  const sel = $("jump-folder");
+  sel.innerHTML = "";
+  for (const folder of meta.folders) {
+    const opt = document.createElement("option");
+    opt.value = folder.name;
+    opt.textContent = `${folder.name} (${folder.count})`;
+    sel.appendChild(opt);
+  }
+}
+
+async function fillImages(folder) {
+  const sel = $("jump-image");
+  sel.innerHTML = "";
+  if (!folder) return;
+  const res = await fetch("/api/folder?name=" + encodeURIComponent(folder));
+  const body = await res.json();
+  for (const image of body.images || []) {
+    const opt = document.createElement("option");
+    opt.value = String(image.index);
+    const mark = image.value ? ` — ${image.value}` : "";
+    opt.textContent = image.image_name + mark;
+    sel.appendChild(opt);
+  }
+}
+
+async function show(nextIndex) {
+  if (!meta || meta.total === 0) {
+    $("status").hidden = false;
+    $("status").textContent = "No images under that prefix. Check CONTAINER_NAME and PREFIX in main.py.";
+    page.hidden = true;
+    return;
+  }
+  index = Math.max(0, Math.min(meta.total - 1, nextIndex));
+  localStorage.setItem("tdc_index", String(index));
+  imageReady = false;
+  buttons(false);
+  const res = await fetch("/api/item?index=" + index);
+  item = await res.json();
+  $("where").textContent = `${item.folder} / ${item.image_name}`;
+  $("progress").textContent =
+    `Folder ${item.folder_number} of ${item.folder_count} · ` +
+    `image ${item.image_in_folder} of ${item.images_in_folder} · ` +
+    `overall ${index + 1} of ${item.total} · ${meta.labeled} labeled · CSV ${meta.csv_path}`;
+  setChip(item.value);
+  $("jump-n").value = String(index + 1);
+  $("jump-n").max = String(meta.total);
+  if ($("jump-folder").value !== item.folder) {
+    $("jump-folder").value = item.folder;
+    await fillImages(item.folder);
+  }
+  const opt = [...$("jump-image").options].find((o) => o.value === String(index));
+  if (opt) $("jump-image").value = String(index);
+  $("status").hidden = false;
+  $("status").textContent = "Loading image…";
+  page.hidden = true;
+  page.src = "/image?index=" + index + "&t=" + Date.now();
+}
+
+page.onload = () => {
+  imageReady = true;
+  page.hidden = false;
+  $("status").hidden = true;
+  buttons(true);
+};
+page.onerror = () => {
+  imageReady = false;
+  page.hidden = true;
+  $("status").hidden = false;
+  $("status").textContent = "Could not load this image from blob.";
+  buttons(true);
+  $("hand").disabled = true;
+  $("print").disabled = true;
+};
+
+async function label(value) {
+  if (busy || !item || !imageReady) return;
+  busy = true;
+  buttons(false);
+  toast("Saving…");
+  try {
+    const res = await fetch("/api/label", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({folder: item.folder, image_name: item.image_name, value}),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    meta.labeled = body.labeled;
+    const opt = [...$("jump-image").options].find((o) => o.value === String(index));
+    if (opt) opt.textContent = item.image_name + " — " + value;
+    toast(item.value ? "Updated " + item.folder + " / " + item.image_name : "Saved");
+    await show(index < meta.total - 1 ? index + 1 : index);
+  } catch (err) {
+    toast(String(err.message || err), true);
+    buttons(true);
+  } finally {
+    busy = false;
+  }
+}
+
+function typingTarget(event) {
+  const tag = (event.target.tagName || "").toLowerCase();
+  return tag === "input" || tag === "select" || tag === "textarea";
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.repeat || typingTarget(event) || !meta) return;
+  const key = event.key;
+  if (key === "a" || key === "A") { event.preventDefault(); label("Handwritten"); }
+  else if (key === " ") { event.preventDefault(); label("Printed"); }
+  else if (key === "ArrowLeft") { event.preventDefault(); if (index > 0) show(index - 1); }
+  else if (key === "ArrowRight") { event.preventDefault(); if (index < meta.total - 1) show(index + 1); }
+  else if (key === "ArrowUp") { event.preventDefault(); previousFolder(); }
+});
+
+$("hand").onclick = () => label("Handwritten");
+$("print").onclick = () => label("Printed");
+$("back").onclick = () => { if (index > 0) show(index - 1); };
+$("next").onclick = () => { if (meta && index < meta.total - 1) show(index + 1); };
+function previousFolder() {
+  if (!item || item.folder_number <= 1) return;
+  const prev = meta.folders[item.folder_number - 2];
+  show(prev.start);
+}
+$("prev-folder").onclick = previousFolder;
+$("jump-folder").onchange = () => fillImages($("jump-folder").value);
+$("jump").onclick = () => {
+  const value = $("jump-image").value;
+  if (value !== "") show(Number(value));
+};
+$("jump-num").onclick = () => {
+  const n = Number($("jump-n").value);
+  if (Number.isInteger(n) && n >= 1 && n <= meta.total) show(n - 1);
+  else toast("Image number must be from 1 to " + meta.total, true);
+};
+$("jump-n").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); $("jump-num").click(); }
+});
+
+(async function poll() {
+  try {
+    const done = await loadMeta();
+    if (!done) setTimeout(poll, 1000);
+  } catch (err) {
+    $("status").textContent = String(err.message || err);
+    setTimeout(poll, 2000);
+  }
+})();
+</script>
+</body>
+</html>
