@@ -47,12 +47,15 @@ decision:
   keep_veto_prob: 0.10
   # Protocol: clinical images + demographics never JUNK/BLANK
   enforce_retention_safeguards: true
-  # Exception: request / instructions / fax sheets quote DOB or MRN. BERT may overrule
-  # demographic retention for these labels at >= 0.95, only when the page also has a
-  # trigger phrase of that subtype. Clinical images are never overruled.
+  # Request / instructions / fax sheets quote DOB or MRN. BERT may overrule
+  # demographic retention for those labels at >= 0.95 only when the page also has a
+  # trigger phrase of that subtype. JUNK_INVOICE does not need the phrase: a billing
+  # page always has a name and DOB, and the model call at >= 0.95 is the decision.
+  # Clinical images are never overruled.
   demographic_override_labels: [JUNK_RECORD_REQUEST, JUNK_INSTRUCTIONS, JUNK_LETTER_FAX, JUNK_INVOICE]
   demographic_override_min_prob: 0.95
   demographic_override_needs_trigger: true  # confidence alone flagged an EMR index page
+  demographic_override_no_trigger_labels: [JUNK_INVOICE]
   require_confident_subtype: true  # one label (not a sum of junk subtypes) must reach junk_blank_min_confidence
 
 taxonomy:

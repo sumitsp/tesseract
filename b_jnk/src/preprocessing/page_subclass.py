@@ -148,7 +148,11 @@ def _candidate_hits(text: str) -> dict[str, list[str]]:
     groups, _ = scan(text)
     out: dict[str, list[str]] = {}
     if groups["strong"] or len(groups["weak"]) >= 2:
-        out["JUNK_INVOICE"] = groups["strong"] + (groups["weak"] if len(groups["weak"]) >= 2 else [])
+        hits = groups["strong"] + (groups["weak"] if len(groups["weak"]) >= 2 else [])
+        # "billing" alone inside a clinical note is not a bill. "Billing Summary"
+        # on a visit stays a visit.
+        if not (set(hits) <= {"billing"} and CLINICAL_SECTION_RE.search(text or "")):
+            out["JUNK_INVOICE"] = hits
     if groups["JUNK_COVER_PAGE"] and word_count(text) <= SHORT_PAGE_MAX_WORDS:
         out["JUNK_COVER_PAGE"] = groups["JUNK_COVER_PAGE"]
     for s in ("JUNK_RECORD_REQUEST", "JUNK_INSTRUCTIONS", "JUNK_LETTER_FAX"):

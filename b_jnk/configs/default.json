@@ -42,6 +42,7 @@
     "demographic_override_labels": ["JUNK_RECORD_REQUEST", "JUNK_INSTRUCTIONS", "JUNK_LETTER_FAX", "JUNK_INVOICE"],
     "demographic_override_min_prob": 0.95,
     "demographic_override_needs_trigger": true,
+    "demographic_override_no_trigger_labels": ["JUNK_INVOICE"],
     "require_confident_subtype": true
   },
   "taxonomy": {

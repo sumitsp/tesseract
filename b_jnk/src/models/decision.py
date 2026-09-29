@@ -26,10 +26,12 @@ class DecisionConfig:
     keep_veto_prob: float = 0.10
     # Protocol: never allow JUNK/BLANK when retention signals fire
     enforce_retention_safeguards: bool = True
-    # Request, instructions, fax, and billing sheets quote a patient's DOB or MRN;
-    # the model may overrule demographic retention for these labels when very sure
-    # AND the page carries a trigger phrase of that same subtype (confidence alone
-    # did not separate an EMR index page from real request letters). Clinical-image
+    # Request, instructions, and fax sheets quote a patient's DOB or MRN. The model
+    # may overrule demographic retention for these labels when very sure AND the page
+    # carries a trigger phrase of that same subtype (confidence alone did not separate
+    # an EMR index page from real request letters). A billing call at or above
+    # demographic_override_min_prob stands on its own: those pages always carry a
+    # name and DOB, and the heading is often glued to the name. Clinical-image
     # retention is never overruled.
     demographic_override_labels: tuple[str, ...] = (
         "JUNK_RECORD_REQUEST",
@@ -39,6 +41,7 @@ class DecisionConfig:
     )
     demographic_override_min_prob: float = 0.95
     demographic_override_needs_trigger: bool = True
+    demographic_override_no_trigger_labels: tuple[str, ...] = ("JUNK_INVOICE",)
     # junk_blank_min_confidence must be met by one label, not by several junk subtypes
     # together; a page the model cannot place stays KEEP for review.
     require_confident_subtype: bool = True
@@ -121,15 +124,17 @@ def decide_from_proba(
         ((label_probs[lab], lab) for lab in config.demographic_override_labels if lab in label_probs),
         default=(0.0, None),
     )
+    trigger_ok = (
+        not config.demographic_override_needs_trigger
+        or override_label in config.demographic_override_no_trigger_labels
+        or override_label in junk_trigger_groups(ocr_text)
+    )
     model_over_demographic = (
         flag == "JUNK"
         and hit.retain_demographic
         and not hit.retain_clinical_image
         and override_prob >= config.demographic_override_min_prob
-        and (
-            not config.demographic_override_needs_trigger
-            or override_label in junk_trigger_groups(ocr_text)
-        )
+        and trigger_ok
     )
     if model_over_demographic:
         reason = "model_over_demographic"
