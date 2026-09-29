@@ -34,7 +34,9 @@ def route_empty_or_unreadable(
 
     - Structurally empty → flag=BLANK (absolute blank)
     - Pictures but no texts → KEEP + review (possible clinical image)
-    - Empty text without structure → KEEP + review (unsafe to auto-blank)
+    - Empty text, no Docling metadata (RapidOCR .txt, CSV, JSONL) → BLANK + review:
+      plain text cannot show whether the page held a picture OCR could not read
+    - Empty text, Docling says non-empty (e.g. an empty table) → KEEP + review
     - Very short text (< min_dictionary_words) → KEEP + review, unless
       route_short_text is False (a model trained on short sheets decides them)
     """
@@ -61,8 +63,16 @@ def route_empty_or_unreadable(
         )
 
     text = (ocr_text or "").strip()
+    if not text and not meta:
+        return RouteDecision(
+            routed=True,
+            reason="empty_ocr_text_only_input",
+            confidence=1.0,
+            flag="BLANK",
+            review_required=True,
+            audit_tag="BLANK_ABSOLUTE_CANDIDATE",
+        )
     if not text:
-        # No Docling structure — cannot prove absolute blank vs image OCR miss
         return RouteDecision(
             routed=True,
             reason="empty_ocr_no_structure",

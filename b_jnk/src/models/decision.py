@@ -38,6 +38,9 @@ class DecisionConfig:
     )
     demographic_override_min_prob: float = 0.95
     demographic_override_needs_trigger: bool = True
+    # junk_blank_min_confidence must be met by one label, not by several junk subtypes
+    # together; a page the model cannot place stays KEEP for review.
+    require_confident_subtype: bool = True
 
 
 @dataclass
@@ -78,6 +81,13 @@ def _bucket_probs(labels: list[str], proba: np.ndarray) -> dict[str, float]:
     for k in buckets:
         buckets[k] = max(0.0, min(1.0, buckets[k]))
     return buckets
+
+
+def _label_flag(label: str) -> Flag | None:
+    try:
+        return to_flag(label)
+    except KeyError:
+        return None
 
 
 def _default_audit(flag: Flag, hit: ProtocolHit) -> str | None:
@@ -132,10 +142,12 @@ def decide_from_proba(
     ):
         flag = "KEEP"
         confidence = float(max(p_keep, confidence, 0.99))
-        review = False  # protocol is definitive KEEP
         if hit.retain_clinical_image:
+            review = False  # protocol is definitive KEEP
             reason = "protocol_retain_clinical_image"
         else:
+            # Model said JUNK/BLANK: request and fax sheets quote a patient's name/DOB too.
+            review = True
             reason = "protocol_retain_demographic"
 
     if flag in {"JUNK", "BLANK"} and p_keep > config.keep_veto_prob:
@@ -144,7 +156,12 @@ def decide_from_proba(
         review = True
         reason = "keep_veto"
 
-    if flag in {"JUNK", "BLANK"} and confidence < config.junk_blank_min_confidence:
+    top_label_prob = max(
+        (float(p) for lab, p in label_probs.items() if _label_flag(lab) == flag),
+        default=confidence,
+    )
+    sure = min(confidence, top_label_prob) if config.require_confident_subtype else confidence
+    if flag in {"JUNK", "BLANK"} and sure < config.junk_blank_min_confidence:
         flag = "KEEP"
         confidence = float(max(p_keep, confidence))
         review = True

@@ -42,8 +42,7 @@ INVOICE_WEAK = (
 TRIGGERS: dict[str, tuple[str, ...]] = {
     "JUNK_COVER_PAGE": ("accept", "unaccept", "cover page"),
     "JUNK_RECORD_REQUEST": (
-        "medical records request", "record request", "records requested", "transmittal sheet",
-        "records attached",
+        "medical records request", "records requested", "transmittal sheet", "records attached",
         "risk adjustment request", "audit fulfillment",
     ),
     "JUNK_INSTRUCTIONS": (

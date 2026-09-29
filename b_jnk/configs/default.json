@@ -41,7 +41,8 @@
     "enforce_retention_safeguards": true,
     "demographic_override_labels": ["JUNK_RECORD_REQUEST", "JUNK_INSTRUCTIONS", "JUNK_LETTER_FAX"],
     "demographic_override_min_prob": 0.95,
-    "demographic_override_needs_trigger": true
+    "demographic_override_needs_trigger": true,
+    "require_confident_subtype": true
   },
   "taxonomy": {
     "flags": ["KEEP", "BLANK", "JUNK"],

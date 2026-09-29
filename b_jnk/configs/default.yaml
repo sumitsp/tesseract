@@ -53,6 +53,7 @@ decision:
   demographic_override_labels: [JUNK_RECORD_REQUEST, JUNK_INSTRUCTIONS, JUNK_LETTER_FAX]
   demographic_override_min_prob: 0.95
   demographic_override_needs_trigger: true  # confidence alone flagged an EMR index page
+  require_confident_subtype: true  # one label (not a sum of junk subtypes) must reach junk_blank_min_confidence
 
 taxonomy:
   flags:

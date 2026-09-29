@@ -5,12 +5,24 @@
     "v03_Untitled__7__d01_462124_p04": "JUNK",
     "v03_Untitled__7__d01_462124_p14": "JUNK_LETTER_FAX",
     "v03_Untitled__7__d01_462124_p15": "JUNK_LETTER_FAX",
-    "v03_Untitled__7__d01_462124_p16": "JUNK_LETTER_FAX"
+    "v03_Untitled__7__d01_462124_p16": "JUNK_LETTER_FAX",
+    "v03_Untitled__14__d01_p01": "JUNK_LETTER_FAX",
+    "v03_Untitled__14__d01_p02": "JUNK_LETTER_FAX",
+    "v03_Untitled__14__d01_p04": "JUNK_LETTER_FAX",
+    "v03_Untitled__14__d01_p05": "JUNK_LETTER_FAX",
+    "v03_Untitled__14__d01_p07": "JUNK_LETTER_FAX",
+    "v03_Untitled__14__d01_p08": "JUNK_LETTER_FAX"
   },
   "reasons": {
     "v03_Untitled__7__d01_462124_p14": "Hospital letter: unable to locate records, returning the original request - no clinical content",
     "v03_Untitled__7__d01_462124_p15": "Hospital letter: unable to locate records, returning the original request - no clinical content",
-    "v03_Untitled__7__d01_462124_p16": "Hospital letter: patient not seen on requested dates, returning the original request - no clinical content"
+    "v03_Untitled__7__d01_462124_p16": "Hospital letter: patient not seen on requested dates, returning the original request - no clinical content",
+    "v03_Untitled__14__d01_p01": "HIPAA fax cover notice - no clinical content",
+    "v03_Untitled__14__d01_p02": "Fax cover page (please find the attached documents) under a patient name/DOB header - no clinical content",
+    "v03_Untitled__14__d01_p04": "HIPAA fax cover notice - no clinical content",
+    "v03_Untitled__14__d01_p05": "Fax cover page (please find the attached documents) under a patient name/DOB header - no clinical content",
+    "v03_Untitled__14__d01_p07": "HIPAA fax cover notice - no clinical content",
+    "v03_Untitled__14__d01_p08": "Fax cover page to Medical Records (most recent records attached) under a patient name/DOB header - no clinical content"
   },
   "packets": [
     {
@@ -36,6 +48,11 @@
         12,
         13
       ]
+    },
+    {
+      "source": "Untitled__14_.txt",
+      "junk_pages": [1, 2, 4, 5, 7, 8],
+      "keep_pages": [3, 6, 9, 10, 11, 12, 13, 14]
     }
   ]
 }
