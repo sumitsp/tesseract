@@ -170,15 +170,43 @@ def main_purpose(text: str, candidates: dict[str, list[str]]) -> tuple[str, str]
     return best, f"most_triggers:{'+'.join(candidates[best][:3])}"
 
 
-def is_gibberish(text: str) -> bool:
+def _content_tokens(text: str) -> list[str]:
     tokens = [t.strip(".,;:!?()[]{}'\"|-_*") for t in (text or "").split()]
-    tokens = [t for t in tokens if t and not re.fullmatch(r"[\d/\-.:#$%]+", t)]
+    return [t for t in tokens if t and not re.fullmatch(r"[\d/\-.:#$%]+", t)]
+
+
+def _wordlike(token: str) -> bool:
+    return bool(
+        re.fullmatch(r"[A-Za-z][a-z]+|[A-Z]{2,}", token) and re.search(r"[aeiouyAEIOUY]", token)
+    )
+
+
+def is_gibberish(text: str) -> bool:
+    tokens = _content_tokens(text)
     if len(tokens) < 20:
         return False
-    wordlike = sum(
-        1 for t in tokens if re.fullmatch(r"[A-Za-z][a-z]+|[A-Z]{2,}", t) and re.search(r"[aeiouyAEIOUY]", t)
-    )
-    return wordlike / len(tokens) < 0.5
+    return sum(1 for t in tokens if _wordlike(t)) / len(tokens) < 0.5
+
+
+def is_unreadable_page(text: str) -> bool:
+    """A full page that is not language.
+
+    Numbers are ignored, so a lab table is not this. A run of real words is not
+    this either: a badly scanned clinical page that still has a sentence stays
+    out of JUNK_OTHERS.
+    """
+    tokens = _content_tokens(text)
+    if len(tokens) < 30:
+        return False
+    wordlike = [_wordlike(t) for t in tokens]
+    if sum(wordlike) / len(tokens) >= 0.25:
+        return False
+    run = 0
+    for ok in wordlike:
+        run = run + 1 if ok else 0
+        if run >= 6:
+            return False
+    return True
 
 
 @dataclass(frozen=True)

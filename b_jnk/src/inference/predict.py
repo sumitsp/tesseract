@@ -105,13 +105,17 @@ class PageClassifierService:
             elif hit.retain_demographic:
                 flag = "KEEP"
                 audit = "KEEP_DEMOGRAPHIC"
-                review = False
-            subclass, subclass_reason = _subclass(
-                flag,
-                ocr_text,
-                model_tag=None,
-                structurally_empty=bool((content_meta or {}).get("is_structurally_empty")),
-            )
+                # Gibberish that happens to contain "dob" is not a real face sheet.
+                review = route.reason == "gibberish_ocr"
+            if route.reason == "gibberish_ocr" and flag == "JUNK":
+                subclass, subclass_reason = "JUNK_OTHERS", "gibberish"
+            else:
+                subclass, subclass_reason = _subclass(
+                    flag,
+                    ocr_text,
+                    model_tag=None,
+                    structurally_empty=bool((content_meta or {}).get("is_structurally_empty")),
+                )
             return InferenceResult(
                 page_id=page_id,
                 flag=flag,

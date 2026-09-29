@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from src.features.ocr_features import count_dictionary_words
+from src.preprocessing.page_subclass import is_unreadable_page
 
 Flag = Literal["KEEP", "BLANK", "JUNK"]
 
@@ -39,6 +40,9 @@ def route_empty_or_unreadable(
     - Empty text, Docling says non-empty (e.g. an empty table) → KEEP + review
     - Very short text (< min_dictionary_words) → KEEP + review, unless
       route_short_text is False (a model trained on short sheets decides them)
+    - A full page of non-words, with no picture and no readable sentence →
+      JUNK + review, subtype JUNK_OTHERS. A page that still reads in places
+      is left for the model.
     """
     meta = content_meta or {}
 
@@ -93,5 +97,14 @@ def route_empty_or_unreadable(
             flag="KEEP",
             review_required=True,
             audit_tag="UNREADABLE_OCR",
+        )
+    if is_unreadable_page(text) and not meta.get("has_pictures"):
+        return RouteDecision(
+            routed=True,
+            reason="gibberish_ocr",
+            confidence=0.9,
+            flag="JUNK",
+            review_required=True,
+            audit_tag="JUNK_OTHERS",
         )
     return RouteDecision(routed=False, reason=None, confidence=0.0)
