@@ -53,7 +53,8 @@ CONTAINER_NAME = "YOUR_CONTAINER_NAME"
 PREFIX = "Run1/Batch1/DEID_PNGs/"
 START_FROM = ""
 
-# Optional: full path to handwritten_printed_convnext_tiny.pth (None = default)
+# Optional: full path to a handwritten/printed .pth
+# (None = document_type/models/page_printed_handwritten_convnext_tiny.pth)
 CLASSIFIER_MODEL: Path | None = None
 
 # =============================================================================

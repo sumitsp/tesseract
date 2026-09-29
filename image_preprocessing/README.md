@@ -19,7 +19,7 @@ cd image_preprocessing
 python -m pip install -r requirements.txt
 ```
 
-Tesseract must be installed on the system. Coarse rotation is Tesseract OSD only (0/90/180/270). If OSD cannot decide, the page is left unrotated — geometric rotation is not used as a fallback. The handwritten/printed classifier is the existing ConvNeXt-Tiny model under `document_type/` — it is not retrained here.
+Tesseract must be installed on the system. Coarse rotation is Tesseract OSD only (0/90/180/270). If OSD cannot decide, the page is left unrotated — geometric rotation is not used as a fallback. The handwritten/printed classifier is the retrained page-level ConvNeXt-Tiny model in `document_type/models/page_printed_handwritten_convnext_tiny.pth` (copied from `hw_printed_rf_test`, loaded by `document_type/page_classifier.py`); it is not retrained here. If that file is missing or only a Git LFS pointer, the older `handwritten_printed_convnext_tiny.pth` is used. Run `git lfs pull` after cloning.
 
 ## Run
 

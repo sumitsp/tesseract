@@ -18,7 +18,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from image_preprocessing.document_type import hw_printed
+from image_preprocessing.document_type import hw_printed, page_classifier
 from image_preprocessing.utils.image_utils import encode_png_bytes, to_gray
 
 # Below this fraction of dark pixels, the page is treated as blank for HW/printed.
@@ -45,12 +45,8 @@ class DocumentTypeResult:
 
 
 def default_model_path() -> Path:
-    newer = (
-        Path(__file__).resolve().parents[2]
-        / "hw_printed_rf_test"
-        / "models"
-        / "page_printed_handwritten_convnext_tiny.pth"
-    )
+    newer = page_classifier.DEFAULT_PAGE_MODEL
+    # An LFS pointer (not pulled) is a few hundred bytes.
     if newer.is_file() and newer.stat().st_size > 1_000_000:
         return newer
     return Path(hw_printed.DEFAULT_MODEL_PATH)
@@ -59,10 +55,8 @@ def default_model_path() -> Path:
 def load_classifier(model_path: Path | None = None) -> Any:
     path = Path(model_path) if model_path is not None else default_model_path()
     LOGGER.info("Loading handwritten/printed classifier from %s", path)
-    if path.name == "page_printed_handwritten_convnext_tiny.pth":
-        from hw_printed_rf_test.page_classifier import load_hybrid_classifier
-
-        return load_hybrid_classifier(path)
+    if path.name == page_classifier.DEFAULT_PAGE_MODEL.name:
+        return page_classifier.load_hybrid_classifier(path)
     return hw_printed.load_model(path)
 
 
@@ -88,9 +82,7 @@ def classify_page(image: np.ndarray, model: Any | None = None) -> DocumentTypeRe
                 raw_label="Uncertain",
             )
         if isinstance(model, dict) and "model" in model:
-            from hw_printed_rf_test.page_classifier import classify_page_hybrid
-
-            hybrid = classify_page_hybrid(image, bundle=model)
+            hybrid = page_classifier.classify_page_hybrid(image, bundle=model)
             return DocumentTypeResult(
                 document_type=hybrid.document_type,
                 confidence=hybrid.p_handwritten,
