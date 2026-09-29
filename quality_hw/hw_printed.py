@@ -214,7 +214,10 @@ def load_page_classifier(model_path: Path | None = None) -> dict[str, Any]:
         "image_size": int(ckpt.get("image_size") or 224),
         "mean": tuple(ckpt.get("normalize_mean") or (0.485, 0.456, 0.406)),
         "std": tuple(ckpt.get("normalize_std") or (0.229, 0.224, 0.225)),
-        "threshold": float(DEFAULT_DECISION_THRESHOLD),
+        # A model trained by quality_hw/train.py is calibrated at 0.5.
+        # The shipped model is not, and keeps the lower cutoff.
+        "threshold": float(ckpt.get("decision_threshold") or DEFAULT_DECISION_THRESHOLD)
+        if ckpt.get("labeled_retrain") else float(DEFAULT_DECISION_THRESHOLD),
         "uncertain_min_confidence": float(ckpt.get("uncertain_min_confidence") or 0.50),
         "uncertain_margin": float(ckpt.get("uncertain_margin") or 0.06),
     }
