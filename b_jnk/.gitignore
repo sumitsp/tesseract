@@ -19,3 +19,11 @@ reports/dataset_quality*
 # Optional embedding artifacts
 models/embedding_flat.joblib
 models/*.tmp
+
+# BERT weights are tracked with Git LFS (see repo .gitattributes); the repo root ignores *.safetensors.
+# Synthetic prompts / checked output are regenerable; the combined file duplicates synthetic/raw.
+!models/bert_page/model.safetensors
+models/bert_page.tmp/
+synthetic/prompts/
+synthetic/checked/
+synthetic/synthetic_all_*.jsonl

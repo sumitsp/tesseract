@@ -38,10 +38,29 @@
     "min_flag_confidence": 0.70,
     "junk_blank_min_confidence": 0.85,
     "keep_veto_prob": 0.10,
-    "enforce_retention_safeguards": true
+    "enforce_retention_safeguards": true,
+    "demographic_override_labels": ["JUNK_RECORD_REQUEST", "JUNK_INSTRUCTIONS", "JUNK_LETTER_FAX"],
+    "demographic_override_min_prob": 0.95,
+    "demographic_override_needs_trigger": true
   },
   "taxonomy": {
     "flags": ["KEEP", "BLANK", "JUNK"],
     "protocol": "blank_junk_elimination_v1"
+  },
+  "bert": {
+    "base_model": "distilbert-base-uncased",
+    "model_dir": "models/bert_page",
+    "synthetic_clean": "synthetic/checked/clean.jsonl",
+    "max_length": 512,
+    "head_share": 0.75,
+    "epochs": 4,
+    "batch_size": 8,
+    "learning_rate": 3e-5,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.1,
+    "keep_weight": 3.0,
+    "real_copies": 3,
+    "decide_short_pages": true,
+    "seed": 42
   }
 }

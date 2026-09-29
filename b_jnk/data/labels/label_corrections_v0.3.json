@@ -2,7 +2,15 @@
   "note": "Human corrections after initial all-KEEP ingest",
   "by_page_id": {
     "v03_Untitled__7__d01_462124_p02": "JUNK",
-    "v03_Untitled__7__d01_462124_p04": "JUNK"
+    "v03_Untitled__7__d01_462124_p04": "JUNK",
+    "v03_Untitled__7__d01_462124_p14": "JUNK_LETTER_FAX",
+    "v03_Untitled__7__d01_462124_p15": "JUNK_LETTER_FAX",
+    "v03_Untitled__7__d01_462124_p16": "JUNK_LETTER_FAX"
+  },
+  "reasons": {
+    "v03_Untitled__7__d01_462124_p14": "Hospital letter: unable to locate records, returning the original request - no clinical content",
+    "v03_Untitled__7__d01_462124_p15": "Hospital letter: unable to locate records, returning the original request - no clinical content",
+    "v03_Untitled__7__d01_462124_p16": "Hospital letter: patient not seen on requested dates, returning the original request - no clinical content"
   },
   "packets": [
     {
@@ -10,7 +18,10 @@
       "patient": "Anderson Justin MRN 462124",
       "junk_pages": [
         2,
-        4
+        4,
+        14,
+        15,
+        16
       ],
       "keep_pages": [
         1,
@@ -23,10 +34,7 @@
         10,
         11,
         12,
-        13,
-        14,
-        15,
-        16
+        13
       ]
     }
   ]

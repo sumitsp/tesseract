@@ -22,6 +22,7 @@ import csv
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 
@@ -38,6 +39,8 @@ INPUT_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\extracted_text_docling
 # INPUT_PATH = ROOT / "data" / "samples" / "sample_pages.jsonl"
 
 MODEL_PATH = ROOT / "models" / "tfidf_flat.joblib"
+# Used instead of MODEL_PATH when present and torch + transformers are installed
+BERT_DIR = ROOT / "models" / "bert_page"
 CONFIG_PATH = ROOT / "configs" / "default.json"
 # ---------------------------------------------------------------------------
 
@@ -57,6 +60,7 @@ def _load_cfg(path: Path) -> dict:
 
 
 from src.inference.predict import InferenceResult, PageClassifierService  # noqa: E402
+from src.models.bert_classifier import bert_available  # noqa: E402
 from src.models.classifiers import FlatClassifier  # noqa: E402
 from src.models.decision import DecisionConfig  # noqa: E402
 from src.preprocessing.docling_page import extract_docling_page  # noqa: E402
@@ -65,6 +69,8 @@ from src.preprocessing.docling_page import extract_docling_page  # noqa: E402
 COLUMNS = [
     "page_id",
     "flag",
+    "subclass",
+    "subclass_reason",
     "audit_tag",
     "confidence",
     "review_required",
@@ -392,17 +398,32 @@ def main() -> int:
             f"Input not found: {in_path}\n"
             f"Edit INPUT_PATH at the top of scripts/infer.py"
         )
-    if not model_path.exists():
-        raise SystemExit(f"Model not found: {model_path}")
-
-    print(f"Loading model: {model_path}", flush=True)
     cfg = _load_cfg(config_path)
-    model = FlatClassifier.load(str(model_path))
+    model = None
+    model_version = cfg["model_version"]
+    route_short_pages = True
+    if bert_available(BERT_DIR):
+        try:
+            from src.models.bert_classifier import BertPageClassifier
+
+            print(f"Loading BERT model: {BERT_DIR}", flush=True)
+            model = BertPageClassifier.load(BERT_DIR)
+            model_version += "+bert"
+            route_short_pages = not cfg.get("bert", {}).get("decide_short_pages", False)
+        except ImportError as exc:
+            print(f"BERT needs torch + transformers ({exc}); using TF-IDF", flush=True)
+    if model is None:
+        if not model_path.exists():
+            raise SystemExit(f"Model not found: {model_path}")
+        print(f"Loading model: {model_path}", flush=True)
+        model = FlatClassifier.load(str(model_path))
+        model_version += "+tfidf"
     service = PageClassifierService(
         model,
-        model_version=cfg["model_version"],
+        model_version=model_version,
         decision=DecisionConfig(**cfg["decision"]),
         min_dictionary_words=cfg["routing"]["min_dictionary_words"],
+        route_short_pages=route_short_pages,
     )
 
     print(f"Reading input: {in_path}", flush=True)
@@ -417,6 +438,7 @@ def main() -> int:
 
     rows: list[dict] = []
     n_keep = n_blank = n_junk = n_review = 0
+    subclass_counts: Counter[str] = Counter()
     for i, page in enumerate(pages, start=1):
         r = service.predict_one(
             page["page_id"],
@@ -435,9 +457,12 @@ def main() -> int:
             n_junk += 1
         if r.review_required:
             n_review += 1
+        if r.subclass:
+            subclass_counts[r.subclass] += 1
         review = " review" if r.review_required else ""
+        label = f"{r.flag}/{r.subclass}" if r.subclass else r.flag
         print(
-            f"[{i}/{total}] {r.page_id} → {r.flag} "
+            f"[{i}/{total}] {r.page_id} → {label} "
             f"(conf={r.confidence:.3f}{review}) | saved",
             flush=True,
         )
@@ -450,6 +475,8 @@ def main() -> int:
         f"  KEEP={n_keep}  BLANK={n_blank}  JUNK={n_junk}  review_required={n_review}",
         flush=True,
     )
+    for name, count in sorted(subclass_counts.items()):
+        print(f"    {name}={count}", flush=True)
     return 0
 
 

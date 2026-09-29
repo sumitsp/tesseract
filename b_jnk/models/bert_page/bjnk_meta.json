@@ -1,0 +1,56 @@
+{
+  "labels": [
+    "KEEP",
+    "BLANK",
+    "JUNK_INVOICE",
+    "JUNK_COVER_PAGE",
+    "JUNK_RECORD_REQUEST",
+    "JUNK_INSTRUCTIONS",
+    "JUNK_LETTER_FAX",
+    "JUNK_OTHERS"
+  ],
+  "max_length": 512,
+  "head_share": 0.75,
+  "base_model": "distilbert-base-uncased",
+  "trained_at": "2026-09-28 20:44:22",
+  "epochs": 4,
+  "train_pages": {
+    "synthetic": 2775,
+    "real": 207,
+    "real_copies": 3
+  },
+  "eval": {
+    "synthetic_only": {
+      "pages": 207,
+      "keep_pages_lost": 1,
+      "junk_or_blank_caught": 36,
+      "junk_or_blank_pages": 56,
+      "junk_subtype_correct": 27,
+      "junk_subtype_checked": 31
+    },
+    "real_2fold_test0": {
+      "pages": 81,
+      "keep_pages_lost": 0,
+      "junk_or_blank_caught": 24,
+      "junk_or_blank_pages": 33,
+      "junk_subtype_correct": 22,
+      "junk_subtype_checked": 22
+    },
+    "real_2fold_test1": {
+      "pages": 126,
+      "keep_pages_lost": 1,
+      "junk_or_blank_caught": 20,
+      "junk_or_blank_pages": 23,
+      "junk_subtype_correct": 16,
+      "junk_subtype_checked": 17
+    },
+    "real_2fold": {
+      "pages": 207,
+      "keep_pages_lost": 1,
+      "junk_or_blank_caught": 44,
+      "junk_or_blank_pages": 56,
+      "junk_subtype_correct": 38,
+      "junk_subtype_checked": 39
+    }
+  }
+}

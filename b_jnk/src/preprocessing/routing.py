@@ -25,6 +25,7 @@ def route_empty_or_unreadable(
     *,
     min_dictionary_words: int = 2,
     content_meta: dict[str, Any] | None = None,
+    route_short_text: bool = True,
 ) -> RouteDecision:
     """Route pages that should not go through the text classifier alone.
 
@@ -34,6 +35,8 @@ def route_empty_or_unreadable(
     - Structurally empty → flag=BLANK (absolute blank)
     - Pictures but no texts → KEEP + review (possible clinical image)
     - Empty text without structure → KEEP + review (unsafe to auto-blank)
+    - Very short text (< min_dictionary_words) → KEEP + review, unless
+      route_short_text is False (a model trained on short sheets decides them)
     """
     meta = content_meta or {}
 
@@ -69,6 +72,8 @@ def route_empty_or_unreadable(
             audit_tag="BLANK_ABSOLUTE_CANDIDATE",
         )
 
+    if not route_short_text:
+        return RouteDecision(routed=False, reason=None, confidence=0.0)
     n_dict = count_dictionary_words(text)
     if n_dict < min_dictionary_words and len(text) < 40:
         return RouteDecision(

@@ -47,6 +47,12 @@ decision:
   keep_veto_prob: 0.10
   # Protocol: clinical images + demographics never JUNK/BLANK
   enforce_retention_safeguards: true
+  # Exception: request / instructions / fax sheets quote DOB or MRN. BERT may overrule
+  # demographic retention for these labels at >= 0.95, only when the page also has a
+  # trigger phrase of that subtype. Clinical images are never overruled.
+  demographic_override_labels: [JUNK_RECORD_REQUEST, JUNK_INSTRUCTIONS, JUNK_LETTER_FAX]
+  demographic_override_min_prob: 0.95
+  demographic_override_needs_trigger: true  # confidence alone flagged an EMR index page
 
 taxonomy:
   flags:
@@ -54,3 +60,21 @@ taxonomy:
     - BLANK
     - JUNK
   protocol: blank_junk_elimination_v1
+
+# 8-label BERT (KEEP, BLANK, six JUNK subtypes). Trained on synthetic/checked/clean.jsonl
+# plus real labelled pages; scripts/infer.py uses it when models/bert_page exists.
+bert:
+  base_model: distilbert-base-uncased
+  model_dir: models/bert_page
+  synthetic_clean: synthetic/checked/clean.jsonl
+  max_length: 512
+  head_share: 0.75       # share of tokens kept from the start of long pages; rest from the end
+  epochs: 4
+  batch_size: 8
+  learning_rate: 3.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  keep_weight: 3.0       # loss weight on KEEP: losing a chart page costs more than missing junk
+  real_copies: 3         # repeat each real training page so ~200 real pages count next to ~2,800 synthetic
+  decide_short_pages: true  # BERT decides very short sheets (ACCEPT, scan marks); false = always KEEP + review
+  seed: 42

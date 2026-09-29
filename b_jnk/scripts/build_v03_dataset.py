@@ -337,18 +337,23 @@ def main() -> int:
     if corr_path.exists():
         corr = json.loads(corr_path.read_text(encoding="utf-8"))
         by_id = corr.get("by_page_id") or {}
+        from src.preprocessing.taxonomy import to_flag
+
         n_corr = 0
         for r in final:
-            flag = by_id.get(r["page_id"])
-            if not flag:
+            label = by_id.get(r["page_id"])
+            if not label:
                 continue
-            r["label"]["primary_class"] = flag
+            flag = to_flag(label)
+            r["label"]["primary_class"] = label
             r["label"]["flag"] = flag
             r["label"]["keep_delete"] = (
                 "DELETE" if flag in {"BLANK", "JUNK"} else "KEEP"
             )
             r["label"]["confidence"] = "HIGH"
             r["annotation"]["label_version"] = "v0.3.1"
+            if (corr.get("reasons") or {}).get(r["page_id"]):
+                r["annotation"]["reason_for_label"] = "Human correction: " + corr["reasons"][r["page_id"]]
             r["train_eligible"] = bool((r.get("ocr_text") or "").strip())
             n_corr += 1
         print(f"Applied {n_corr} label corrections from {corr_path.name}")
