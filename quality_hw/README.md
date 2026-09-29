@@ -23,7 +23,7 @@ Edit the RUN CONFIG block at the top of `main.py`:
 
 - `INPUT_SOURCE = "local"`: set `LOCAL_INPUT` to a file or folder.
 - `INPUT_SOURCE = "blob"`: set `CONTAINER_NAME` and `PREFIX` (`PREFIX/<chart folder>/<file>`); sign in with `az login`. `START_FROM` resumes from a chart folder and appends to the existing report.
-- `OUTPUT_DIR`: where `quality_hw_report.xlsx` is written. It is saved after every page, so it can be opened while the run is going.
+- `OUTPUT_DIR`: where `quality_hw_report.csv` is written. A row is added after every page, so it can be opened while the run is going.
 
 ```bash
 python quality_hw/main.py

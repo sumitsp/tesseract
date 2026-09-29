@@ -2,7 +2,7 @@
 
 For every page: engineering quality score (0-10, Good/Bad) and document type
 (PRINTED / HANDWRITTEN / BLANK / UNCERTAIN) from the ConvNeXt-Tiny page model
-plus handwriting ink evidence. Results go to a live Excel report.
+plus handwriting ink evidence. Results go to a live CSV report.
 
 Edit RUN CONFIG below, then run:  python main.py
 """
@@ -21,7 +21,7 @@ if __package__ in (None, ""):
 from quality_hw import hw_printed
 from quality_hw.pages import Page, blob_files, connect_container, load_pages, local_files
 from quality_hw.quality import analyze_quality
-from quality_hw.report import ExcelReport
+from quality_hw.report import CsvReport
 
 # ============================== RUN CONFIG ==============================
 INPUT_SOURCE = "local"  # "local" or "blob"
@@ -36,7 +36,7 @@ PREFIX = "Run1/Batch1/DEID_PNGs/"
 START_FROM = ""  # chart folder to resume from; appends to the existing report
 
 OUTPUT_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\quality_hw_output")
-REPORT_NAME = "quality_hw_report.xlsx"
+REPORT_NAME = "quality_hw_report.csv"
 
 TARGET_DPI = 400  # PDF render DPI and the DPI quality is scored against
 LOW_DPI_THRESHOLD = 150
@@ -105,7 +105,7 @@ def _error_row(folder: str, file_name: str, exc: Exception) -> dict[str, Any]:
             "Error": f"Load failed: {type(exc).__name__}: {exc}"}
 
 
-def _run(files, read_bytes, report: ExcelReport, bundle: dict[str, Any]) -> int:
+def _run(files, read_bytes, report: CsvReport, bundle: dict[str, Any]) -> int:
     n_pages = 0
     for folder, file_name, ref in files:
         try:
@@ -134,11 +134,11 @@ def main() -> None:
     started = time.perf_counter()
     if source == "local":
         files = local_files(LOCAL_INPUT)
-        report = ExcelReport(report_path)
+        report = CsvReport(report_path)
         n = _run(files, lambda p: Path(p).read_bytes(), report, bundle)
     elif source == "blob":
         container = connect_container(STORAGE_ACCOUNT, CONTAINER_NAME)
-        report = ExcelReport(report_path, resume=bool(START_FROM))
+        report = CsvReport(report_path, resume=bool(START_FROM))
         files = blob_files(container, PREFIX, START_FROM)
         n = _run(files, lambda name: container.download_blob(name).readall(), report, bundle)
     else:
