@@ -1,0 +1,9 @@
+{
+  "name": "hierarchical_tfidf",
+  "labels": [
+    "KEEP",
+    "BLANK",
+    "JUNK"
+  ],
+  "note": "Coarse KEEP/DROP then BLANK/JUNK"
+}
