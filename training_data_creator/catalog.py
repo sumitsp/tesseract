@@ -44,7 +44,27 @@ def connect_container(storage_account: str, container_name: str) -> Any:
     return client.get_container_client(container_name)
 
 
-def list_images(container: Any, prefix: str) -> list[ImageItem]:
+def apply_start_from(items: list[ImageItem], start_from: str) -> list[ImageItem]:
+    """Keep the named folder and every folder after it. Empty means the full list."""
+    name = (start_from or "").strip()
+    if not name:
+        return items
+    folders: list[str] = []
+    for item in items:
+        if not folders or folders[-1] != item.folder:
+            folders.append(item.folder)
+    exact = [folder for folder in folders if folder == name]
+    folded = [folder for folder in folders if folder.lower() == name.lower()]
+    match = exact[0] if exact else (folded[0] if len(folded) == 1 else "")
+    if not match:
+        if len(folded) > 1:
+            raise ValueError(f"START_FROM {name!r} matches more than one folder")
+        raise ValueError(f"START_FROM folder not found: {name}")
+    LOGGER.info("Starting at folder %s", match)
+    return [item for item in items if folders.index(item.folder) >= folders.index(match)]
+
+
+def list_images(container: Any, prefix: str, start_from: str = "") -> list[ImageItem]:
     """Images under prefix/<folder>/<file>, folders then files in name order."""
     if prefix and not prefix.endswith("/"):
         prefix += "/"
@@ -65,7 +85,10 @@ def list_images(container: Any, prefix: str) -> list[ImageItem]:
         files = sorted(by_folder[folder], key=lambda pair: _natural_key(Path(pair[0]).name))
         items.extend(ImageItem(folder, name, blob_name) for name, blob_name in files)
     LOGGER.info("%s images in %s folders (scanned %s blobs)", len(items), len(by_folder), seen)
-    return items
+    kept = apply_start_from(items, start_from)
+    if kept is not items:
+        LOGGER.info("%s images from folder %s onward", len(kept), (start_from or "").strip())
+    return kept
 
 
 def read_blob_image(container: Any, item: ImageItem) -> tuple[bytes, str]:

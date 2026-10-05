@@ -16,20 +16,37 @@
   header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; flex-wrap: wrap; }
   h1 { font-size: 16px; margin: 0; font-weight: 650; }
   .muted { color: #555; }
-  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; }
-  #page { max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.18); }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; padding: 8px; }
+  #frame { position: relative; max-width: 100%; max-height: 100%; }
+  #page { display: block; max-width: 100%; max-height: calc(100vh - 230px); width: auto; height: auto; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.18); }
+  #draw { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+  #box { position: absolute; border: 2px solid #c8102e; background: rgba(200, 16, 46, .18); pointer-events: none; }
   #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; }
   button, select, input {
     font: inherit; padding: 7px 12px; border: 1px solid #bbb; border-radius: 6px; background: #fff;
   }
   button { cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
+  button.on { outline: 2px solid #1a1a1a; }
   button.hw { background: #f3e6c4; }
   button.pr { background: #d9e6f5; }
-  .chip { font-weight: 650; padding: 2px 8px; border-radius: 99px; }
+  button.form { background: #e5f2d8; }
+  button.visual { background: #efe4f6; }
+  button.blank { background: #f4f4f4; }
+  button.uncertain { background: #fde7d6; }
+  button.vis { background: #d9f0ea; }
+  button.hid { background: #f6d6d6; }
+  .chip { font-weight: 650; padding: 2px 8px; border-radius: 99px; background: #eee; }
   .chip.hw { background: #f3e6c4; }
   .chip.pr { background: #d9e6f5; }
-  .chip.none { background: #eee; color: #555; font-weight: 500; }
+  .chip.form { background: #e5f2d8; }
+  .chip.visual { background: #efe4f6; }
+  .chip.blank { background: #f4f4f4; }
+  .chip.uncertain { background: #fde7d6; }
+  .chip.vis { background: #d9f0ea; }
+  .chip.hid { background: #f6d6d6; }
+  .chip.none { color: #555; font-weight: 500; }
+  #marks { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   #toast { min-height: 1.2em; }
   .err { color: #9b1c1c; }
   label { display: inline-flex; align-items: center; gap: 6px; }
@@ -41,59 +58,105 @@
     <h1 id="where">Training data</h1>
     <div class="muted" id="progress"></div>
   </div>
-  <div>Current label: <span id="chip" class="chip none">—</span></div>
+  <div id="marks">
+    <span id="chip" class="chip none">not labeled</span>
+    <span id="vis" class="chip none">visibility not set</span>
+    <span id="pct" class="chip none">0% written</span>
+  </div>
 </header>
 <div id="stage">
   <div id="status">Reading folders from blob…</div>
-  <img id="page" alt="" hidden>
+  <div id="frame" hidden>
+    <img id="page" alt="">
+    <div id="draw"></div>
+    <div id="box" hidden></div>
+  </div>
 </div>
 <footer>
-  <button type="button" id="back" class="hw" disabled>Back</button>
+  <button type="button" id="back" disabled>Back</button>
   <button type="button" id="prev-folder" disabled>Previous folder</button>
   <button type="button" id="hand" class="hw" disabled>Handwritten (A)</button>
   <button type="button" id="print" class="pr" disabled>Printed (Space)</button>
+  <button type="button" id="form" class="form" disabled>Form (W)</button>
+  <button type="button" id="visual" class="visual" disabled>Visual (N)</button>
+  <button type="button" id="blank" class="blank" disabled>Blank (D)</button>
+  <button type="button" id="uncertain" class="uncertain" disabled>Uncertain (O)</button>
+  <button type="button" id="visible" class="vis" disabled>Visible (F)</button>
+  <button type="button" id="hidden-mark" class="hid" disabled>Not visible (J)</button>
+  <button type="button" id="clear-box" disabled>Clear box</button>
   <button type="button" id="next" disabled>Next</button>
   <label>Folder <select id="jump-folder" disabled></select></label>
   <label>Image <select id="jump-image" disabled></select></label>
   <button type="button" id="jump" disabled>Go</button>
   <label>Number <input id="jump-n" type="number" min="1" step="1" style="width:7em" disabled></label>
   <button type="button" id="jump-num" disabled>Go to number</button>
+  <span class="muted">Enter saves this page and opens the next. Press a chosen key again to clear it.</span>
   <span id="toast" class="muted"></span>
 </footer>
 <script>
 const $ = (id) => document.getElementById(id);
 const page = $("page");
+const frame = $("frame");
+const boxEl = $("box");
+const TYPE_CLASS = {
+  Handwritten: "hw", Printed: "pr", Form: "form", Visual: "visual", Blank: "blank", Uncertain: "uncertain",
+};
 let meta = null;
 let item = null;
 let index = 0;
 let busy = false;
 let imageReady = false;
+let dirty = false;
+let drag = null;
+const TYPE_BUTTONS = {
+  hand: "Handwritten", print: "Printed", form: "Form", visual: "Visual", blank: "Blank", uncertain: "Uncertain",
+};
+const VIS_BUTTONS = { visible: "Visible", "hidden-mark": "Not visible" };
 
 function toast(text, isError) {
   $("toast").textContent = text || "";
   $("toast").className = isError ? "err" : "muted";
 }
 
-function setChip(value) {
+function setMarks() {
+  const type = item && item.value;
+  const visibility = item && item.visibility;
+  const percent = item && item.handwritten_percent != null ? item.handwritten_percent : null;
   const chip = $("chip");
-  chip.textContent = value || "not labeled";
-  chip.className = "chip " + (value === "Handwritten" ? "hw" : value === "Printed" ? "pr" : "none");
+  chip.textContent = type || "not labeled";
+  chip.className = "chip " + (TYPE_CLASS[type] || "none");
+  const vis = $("vis");
+  vis.textContent = visibility || "visibility not set";
+  vis.className = "chip " + (visibility === "Visible" ? "vis" : visibility === "Not visible" ? "hid" : "none");
+  $("pct").textContent = percent == null ? "written not set" : percent + "% written";
+  $("pct").className = "chip " + (percent != null ? "hw" : "none");
+  for (const [id, value] of Object.entries(TYPE_BUTTONS)) $(id).classList.toggle("on", type === value);
+  for (const [id, value] of Object.entries(VIS_BUTTONS)) $(id).classList.toggle("on", visibility === value);
 }
 
 function buttons(on) {
   const atStart = !meta || index <= 0;
   const atEnd = !meta || index >= meta.total - 1;
   const firstFolder = !item || item.folder_number <= 1;
+  for (const id of ["hand", "print", "form", "visual", "blank", "uncertain", "visible", "hidden-mark", "clear-box", "jump", "jump-num", "jump-folder", "jump-n"]) {
+    $(id).disabled = !on;
+  }
   $("back").disabled = !on || atStart;
   $("next").disabled = !on || atEnd;
   $("prev-folder").disabled = !on || firstFolder;
-  $("hand").disabled = !on;
-  $("print").disabled = !on;
-  $("jump").disabled = !on;
-  $("jump-num").disabled = !on;
-  $("jump-folder").disabled = !on;
-  $("jump-n").disabled = !on;
   $("jump-image").disabled = !on || !$("jump-folder").value;
+}
+
+function placeBox(rect) {
+  if (!rect || !rect.width || !rect.height) {
+    boxEl.hidden = true;
+    return;
+  }
+  boxEl.hidden = false;
+  boxEl.style.left = (rect.left * 100) + "%";
+  boxEl.style.top = (rect.top * 100) + "%";
+  boxEl.style.width = (rect.width * 100) + "%";
+  boxEl.style.height = (rect.height * 100) + "%";
 }
 
 async function loadMeta() {
@@ -133,7 +196,7 @@ async function fillImages(folder) {
   for (const image of body.images || []) {
     const opt = document.createElement("option");
     opt.value = String(image.index);
-    const mark = image.value ? ` — ${image.value}` : "";
+    const mark = image.summary ? ` — ${image.summary}` : "";
     opt.textContent = image.image_name + mark;
     sel.appendChild(opt);
   }
@@ -142,13 +205,15 @@ async function fillImages(folder) {
 async function show(nextIndex) {
   if (!meta || meta.total === 0) {
     $("status").hidden = false;
-    $("status").textContent = "No images under that prefix. Check CONTAINER_NAME and PREFIX in main.py.";
-    page.hidden = true;
+    $("status").textContent = "No images under that prefix. Check CONTAINER_NAME, PREFIX, and START_FROM in main.py.";
+    frame.hidden = true;
     return;
   }
   index = Math.max(0, Math.min(meta.total - 1, nextIndex));
   localStorage.setItem("tdc_index", String(index));
   imageReady = false;
+  dirty = false;
+  drag = null;
   buttons(false);
   const res = await fetch("/api/item?index=" + index);
   item = await res.json();
@@ -157,7 +222,8 @@ async function show(nextIndex) {
     `Folder ${item.folder_number} of ${item.folder_count} · ` +
     `image ${item.image_in_folder} of ${item.images_in_folder} · ` +
     `overall ${index + 1} of ${item.total} · ${meta.labeled} labeled · CSV ${meta.csv_path}`;
-  setChip(item.value);
+  setMarks();
+  placeBox(null);
   $("jump-n").value = String(index + 1);
   $("jump-n").max = String(meta.total);
   if ($("jump-folder").value !== item.folder) {
@@ -168,28 +234,46 @@ async function show(nextIndex) {
   if (opt) $("jump-image").value = String(index);
   $("status").hidden = false;
   $("status").textContent = "Loading image…";
-  page.hidden = true;
+  frame.hidden = true;
   page.src = "/image?index=" + index + "&t=" + Date.now();
 }
 
 page.onload = () => {
   imageReady = true;
-  page.hidden = false;
+  frame.hidden = false;
   $("status").hidden = true;
+  placeBox(item && item.box);
   buttons(true);
 };
 page.onerror = () => {
   imageReady = false;
-  page.hidden = true;
+  frame.hidden = true;
   $("status").hidden = false;
   $("status").textContent = "Could not load this image from blob.";
   buttons(true);
-  $("hand").disabled = true;
-  $("print").disabled = true;
+  for (const id of ["hand", "print", "form", "visual", "blank", "uncertain", "visible", "hidden-mark", "clear-box"]) {
+    $(id).disabled = true;
+  }
 };
 
-async function label(value) {
-  if (busy || !item || !imageReady) return;
+function choose(field, value) {
+  if (!item || !imageReady || busy) return;
+  item[field] = item[field] === value ? null : value;
+  dirty = true;
+  setMarks();
+}
+
+function clearBox() {
+  if (!item || !imageReady || busy) return;
+  item.handwritten_percent = null;
+  item.box = null;
+  dirty = true;
+  placeBox(null);
+  setMarks();
+}
+
+async function persist() {
+  if (busy || !item || !imageReady) return false;
   busy = true;
   buttons(false);
   toast("Saving…");
@@ -197,22 +281,101 @@ async function label(value) {
     const res = await fetch("/api/label", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({folder: item.folder, image_name: item.image_name, value}),
+      body: JSON.stringify({
+        replace: true,
+        folder: item.folder,
+        image_name: item.image_name,
+        value: item.value,
+        visibility: item.visibility,
+        handwritten_percent: item.handwritten_percent,
+        box: item.box,
+      }),
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || res.statusText);
     meta.labeled = body.labeled;
+    item.saved = true;
+    item.summary = body.summary;
+    dirty = false;
     const opt = [...$("jump-image").options].find((o) => o.value === String(index));
-    if (opt) opt.textContent = item.image_name + " — " + value;
-    toast(item.value ? "Updated " + item.folder + " / " + item.image_name : "Saved");
-    await show(index < meta.total - 1 ? index + 1 : index);
+    if (opt) opt.textContent = item.image_name + " — " + (body.summary || "—");
+    toast(body.summary || "Saved");
+    buttons(true);
+    return true;
   } catch (err) {
     toast(String(err.message || err), true);
     buttons(true);
+    return false;
   } finally {
     busy = false;
   }
 }
+
+async function go(nextIndex) {
+  if (!meta || busy) return;
+  if (dirty) {
+    const ok = await persist();
+    if (!ok) return;
+  }
+  await show(nextIndex);
+}
+
+async function confirmPage() {
+  if (!meta || busy || !item || !imageReady) return;
+  const ok = await persist();
+  if (!ok) return;
+  if (index < meta.total - 1) await show(index + 1);
+}
+
+function pointerBox(event) {
+  const rect = frame.getBoundingClientRect();
+  const x = Math.min(Math.max(0, event.clientX - rect.left), rect.width);
+  const y = Math.min(Math.max(0, event.clientY - rect.top), rect.height);
+  return {x, y, width: rect.width, height: rect.height};
+}
+
+$("draw").addEventListener("pointerdown", (event) => {
+  if (!imageReady || busy) return;
+  const p = pointerBox(event);
+  if (p.width < 1 || p.height < 1) return;
+  $("draw").setPointerCapture(event.pointerId);
+  drag = {x0: p.x, y0: p.y, x1: p.x, y1: p.y};
+  event.preventDefault();
+});
+$("draw").addEventListener("pointermove", (event) => {
+  if (!drag) return;
+  const p = pointerBox(event);
+  drag.x1 = p.x;
+  drag.y1 = p.y;
+  const left = Math.min(drag.x0, drag.x1);
+  const top = Math.min(drag.y0, drag.y1);
+  const width = Math.abs(drag.x1 - drag.x0);
+  const height = Math.abs(drag.y1 - drag.y0);
+  placeBox({left: left / p.width, top: top / p.height, width: width / p.width, height: height / p.height});
+  const percent = p.width && p.height ? Math.round((width * height) / (p.width * p.height) * 1000) / 10 : 0;
+  $("pct").textContent = percent + "% written";
+});
+$("draw").addEventListener("pointercancel", () => { drag = null; placeBox(item && item.box); setMarks(); });
+$("draw").addEventListener("pointerup", (event) => {
+  if (!drag) return;
+  const p = pointerBox(event);
+  const left = Math.min(drag.x0, drag.x1);
+  const top = Math.min(drag.y0, drag.y1);
+  const width = Math.abs(drag.x1 - drag.x0);
+  const height = Math.abs(drag.y1 - drag.y0);
+  drag = null;
+  if (width < 4 || height < 4 || p.width < 1 || p.height < 1) {
+    placeBox(item && item.box);
+    setMarks();
+    return;
+  }
+  const rect = {left: left / p.width, top: top / p.height, width: width / p.width, height: height / p.height};
+  item.handwritten_percent = Math.round(rect.width * rect.height * 1000) / 10;
+  item.box = rect;
+  dirty = true;
+  placeBox(rect);
+  setMarks();
+});
 
 function typingTarget(event) {
   const tag = (event.target.tagName || "").toLowerCase();
@@ -221,32 +384,45 @@ function typingTarget(event) {
 
 document.addEventListener("keydown", (event) => {
   if (event.repeat || typingTarget(event) || !meta) return;
-  const key = event.key;
-  if (key === "a" || key === "A") { event.preventDefault(); label("Handwritten"); }
-  else if (key === " ") { event.preventDefault(); label("Printed"); }
-  else if (key === "ArrowLeft") { event.preventDefault(); if (index > 0) show(index - 1); }
-  else if (key === "ArrowRight") { event.preventDefault(); if (index < meta.total - 1) show(index + 1); }
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "a") { event.preventDefault(); choose("value", "Handwritten"); }
+  else if (event.key === " ") { event.preventDefault(); choose("value", "Printed"); }
+  else if (key === "d") { event.preventDefault(); choose("value", "Blank"); }
+  else if (key === "w") { event.preventDefault(); choose("value", "Form"); }
+  else if (key === "n") { event.preventDefault(); choose("value", "Visual"); }
+  else if (key === "o") { event.preventDefault(); choose("value", "Uncertain"); }
+  else if (key === "f") { event.preventDefault(); choose("visibility", "Visible"); }
+  else if (key === "j") { event.preventDefault(); choose("visibility", "Not visible"); }
+  else if (key === "Enter" || key === "ArrowRight") { event.preventDefault(); confirmPage(); }
+  else if (key === "ArrowLeft") { event.preventDefault(); if (index > 0) go(index - 1); }
   else if (key === "ArrowUp") { event.preventDefault(); previousFolder(); }
 });
 
-$("hand").onclick = () => label("Handwritten");
-$("print").onclick = () => label("Printed");
-$("back").onclick = () => { if (index > 0) show(index - 1); };
-$("next").onclick = () => { if (meta && index < meta.total - 1) show(index + 1); };
+$("hand").onclick = () => choose("value", "Handwritten");
+$("print").onclick = () => choose("value", "Printed");
+$("form").onclick = () => choose("value", "Form");
+$("visual").onclick = () => choose("value", "Visual");
+$("blank").onclick = () => choose("value", "Blank");
+$("uncertain").onclick = () => choose("value", "Uncertain");
+$("visible").onclick = () => choose("visibility", "Visible");
+$("hidden-mark").onclick = () => choose("visibility", "Not visible");
+$("clear-box").onclick = clearBox;
+$("back").onclick = () => { if (index > 0) go(index - 1); };
+$("next").onclick = () => confirmPage();
 function previousFolder() {
   if (!item || item.folder_number <= 1) return;
   const prev = meta.folders[item.folder_number - 2];
-  show(prev.start);
+  go(prev.start);
 }
 $("prev-folder").onclick = previousFolder;
 $("jump-folder").onchange = () => fillImages($("jump-folder").value);
 $("jump").onclick = () => {
   const value = $("jump-image").value;
-  if (value !== "") show(Number(value));
+  if (value !== "") go(Number(value));
 };
 $("jump-num").onclick = () => {
   const n = Number($("jump-n").value);
-  if (Number.isInteger(n) && n >= 1 && n <= meta.total) show(n - 1);
+  if (Number.isInteger(n) && n >= 1 && n <= meta.total) go(n - 1);
   else toast("Image number must be from 1 to " + meta.total, true);
 };
 $("jump-n").addEventListener("keydown", (event) => {

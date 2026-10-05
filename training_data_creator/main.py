@@ -22,6 +22,8 @@ from training_data_creator.server import App, serve
 STORAGE_ACCOUNT = "azsadve2aipoc"
 CONTAINER_NAME = "YOUR_CONTAINER_NAME"
 PREFIX = "Run1/Batch1/DEID_PNGs/"  # PREFIX/<chart folder>/<image>
+# Empty starts at the first folder. A folder name starts there and continues downward.
+START_FROM = ""
 
 # Labels stay on this machine. Close the file in Excel while labeling.
 CSV_PATH = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\training_labels.csv")
@@ -47,7 +49,7 @@ def main() -> None:
             container = connect_container(STORAGE_ACCOUNT, CONTAINER_NAME)
             app.read_image = lambda item: read_blob_image(container, item)
             LOGGER.info("Listing images under %s", PREFIX)
-            app.set_items(list_images(container, PREFIX))
+            app.set_items(list_images(container, PREFIX, START_FROM))
         except Exception as exc:
             LOGGER.exception("Could not read blob")
             app.fail(f"Could not read blob: {type(exc).__name__}: {exc}")

@@ -10,11 +10,21 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from training_data_creator.catalog import ImageItem
-from training_data_creator.labels import VALUES, LabelStore
+from training_data_creator.labels import TYPES, VISIBILITY, LabelStore
 
 LOGGER = logging.getLogger("training_data_creator")
 _PAGE = Path(__file__).resolve().parent / "static" / "index.html"
 ReadImage = Callable[[ImageItem], tuple[bytes, str]]
+
+
+def _summary(row: dict[str, str] | None) -> str:
+    if not row:
+        return ""
+    parts = [part for part in (row.get("value"), row.get("visibility")) if part]
+    percent = (row.get("handwritten percent") or "").strip()
+    if percent:
+        parts.append(f"{percent}% written")
+    return ", ".join(parts)
 
 
 class App:
@@ -45,7 +55,7 @@ class App:
 
     def _resume_index(self) -> int:
         for i, item in enumerate(self.items):
-            if self.store.get(item.folder, item.image_name) is None:
+            if not self.store.has_row(item.folder, item.image_name):
                 return i
         return max(0, len(self.items) - 1)
 
@@ -65,7 +75,27 @@ class App:
         }
 
     def _labeled_in_catalog(self) -> int:
-        return sum(1 for item in self.items if self.store.get(item.folder, item.image_name))
+        return sum(1 for item in self.items if self.store.has_row(item.folder, item.image_name))
+
+    def _label_view(self, folder: str, image_name: str) -> dict:
+        row = self.store.get(folder, image_name)
+        box = None
+        percent_text = (row or {}).get("handwritten percent") or ""
+        if row and percent_text and row["box width"] and row["box height"]:
+            box = {
+                "left": float(row["box left"] or 0),
+                "top": float(row["box top"] or 0),
+                "width": float(row["box width"]),
+                "height": float(row["box height"]),
+            }
+        return {
+            "saved": row is not None,
+            "value": (row or {}).get("value") or None,
+            "visibility": (row or {}).get("visibility") or None,
+            "handwritten_percent": float(percent_text) if percent_text else None,
+            "box": box,
+            "summary": _summary(row),
+        }
 
     def item(self, index: int) -> dict:
         self._check_index(index)
@@ -77,30 +107,60 @@ class App:
             "total": len(self.items),
             "folder": item.folder,
             "image_name": item.image_name,
-            "value": self.store.get(item.folder, item.image_name),
             "folder_number": folder_pos + 1,
             "folder_count": len(self._folders),
             "image_in_folder": index - folder["start"] + 1,
             "images_in_folder": folder["count"],
+            **self._label_view(item.folder, item.image_name),
         }
 
     def folder_images(self, name: str) -> list[dict]:
-        return [
-            {
-                "image_name": item.image_name,
-                "index": i,
-                "value": self.store.get(item.folder, item.image_name),
-            }
-            for i, item in enumerate(self.items)
-            if item.folder == name
-        ]
+        rows = []
+        for i, item in enumerate(self.items):
+            if item.folder != name:
+                continue
+            view = self._label_view(item.folder, item.image_name)
+            summary = view["summary"] or ("—" if view["saved"] else "")
+            rows.append({"image_name": item.image_name, "index": i, "summary": summary})
+        return rows
 
-    def label(self, folder: str, image_name: str, value: str) -> dict:
+    def label(self, folder: str, image_name: str, body: dict) -> dict:
         if (folder, image_name) not in self._by_key:
             raise KeyError(f"{folder}/{image_name} is not in the blob list")
-        self.store.upsert(folder, image_name, value)
-        LOGGER.info("%s / %s -> %s", folder, image_name, value)
-        return {"ok": True, "value": value, "labeled": self._labeled_in_catalog()}
+        value = body.get("value") or None
+        visibility = body.get("visibility") or None
+        percent = body.get("handwritten_percent")
+        box = body.get("box")
+        if percent is not None:
+            percent = float(percent)
+        if box is not None:
+            box = {
+                "left": float(box["left"]),
+                "top": float(box["top"]),
+                "width": float(box["width"]),
+                "height": float(box["height"]),
+            }
+        if body.get("replace"):
+            row = self.store.replace(
+                folder,
+                image_name,
+                value=None if value is None else str(value),
+                visibility=None if visibility is None else str(visibility),
+                handwritten_percent=percent,
+                box=box,
+            )
+        else:
+            row = self.store.update(
+                folder,
+                image_name,
+                value=None if value is None else str(value),
+                visibility=None if visibility is None else str(visibility),
+                handwritten_percent=percent,
+                box=box,
+                clear_box=bool(body.get("clear_box")),
+            )
+        LOGGER.info("%s / %s -> %s", folder, image_name, _summary(row))
+        return {"ok": True, "labeled": self._labeled_in_catalog(), **self._label_view(folder, image_name)}
 
     def image(self, index: int) -> tuple[bytes, str]:
         self._check_index(index)
@@ -154,15 +214,18 @@ def _handler(app: App):
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(min(length, 1_000_000)) or b"{}")
-                value = str(body.get("value") or "")
-                if value not in VALUES:
-                    self._json(400, {"error": "value must be Handwritten or Printed"})
+                if "value" in body and body["value"] is not None and str(body["value"]) not in TYPES:
+                    self._json(400, {"error": "value must be Handwritten, Printed, Form, Visual, Blank, or Uncertain"})
                     return
-                self._json(200, app.label(str(body.get("folder") or ""), str(body.get("image_name") or ""), value))
+                if "visibility" in body and body["visibility"] is not None and str(body["visibility"]) not in VISIBILITY:
+                    self._json(400, {"error": "visibility must be Visible or Not visible"})
+                    return
+                self._json(200, app.label(str(body.get("folder") or ""), str(body.get("image_name") or ""), body))
             except PermissionError:
                 self._json(409, {"error": "The CSV is open in another program. Close it, then press the key again."})
-            except KeyError as exc:
-                self._json(404, {"error": str(exc)})
+            except (KeyError, ValueError) as exc:
+                status = 404 if isinstance(exc, KeyError) else 400
+                self._json(status, {"error": str(exc)})
             except Exception as exc:
                 LOGGER.exception("label failed")
                 self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
