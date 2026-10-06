@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blank / junk labels</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.4 system-ui, sans-serif; color: #1a1a1a;
+    background: #e8e8e8; height: 100vh; display: flex; flex-direction: column;
+  }
+  header, footer { background: #fff; padding: 10px 16px; border-bottom: 1px solid #ddd; }
+  footer { border-bottom: 0; border-top: 1px solid #ddd; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  .muted { color: #555; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; padding: 8px; }
+  #page { display: block; max-width: 100%; max-height: calc(100vh - 200px); width: auto; height: auto; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.18); }
+  #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+  button, select, input {
+    font: inherit; padding: 7px 12px; border: 1px solid #bbb; border-radius: 6px; background: #fff;
+  }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.on { outline: 2px solid #1a1a1a; }
+  button.keep { background: #d9f0ea; }
+  button.blank { background: #f4f4f4; }
+  button.invoice { background: #fde7d6; }
+  button.cover { background: #efe4f6; }
+  button.request { background: #d9e6f5; }
+  button.instructions { background: #e5f2d8; }
+  button.fax { background: #f3e6c4; }
+  button.others { background: #f6d6d6; }
+  .chip { font-weight: 650; padding: 2px 8px; border-radius: 99px; background: #eee; }
+  .chip.keep { background: #d9f0ea; }
+  .chip.blank { background: #f4f4f4; }
+  .chip.junk { background: #fde7d6; }
+  .chip.none { color: #555; font-weight: 500; }
+  #toast { min-height: 1.2em; }
+  .err { color: #9b1c1c; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="where">Blank / junk labels</h1>
+    <div class="muted" id="progress"></div>
+  </div>
+  <div>Current label: <span id="chip" class="chip none">not labeled</span></div>
+</header>
+<div id="stage">
+  <div id="status">Reading folders from blob…</div>
+  <img id="page" alt="" hidden>
+</div>
+<footer>
+  <button type="button" id="back" disabled>Back</button>
+  <button type="button" id="prev-folder" disabled>Previous folder</button>
+  <button type="button" id="keep" class="keep" disabled>Keep (K)</button>
+  <button type="button" id="blank" class="blank" disabled>Blank (B)</button>
+  <button type="button" id="invoice" class="invoice" disabled>Invoice (I)</button>
+  <button type="button" id="cover" class="cover" disabled>Cover page (C)</button>
+  <button type="button" id="request" class="request" disabled>Record request (R)</button>
+  <button type="button" id="instructions" class="instructions" disabled>Instructions (N)</button>
+  <button type="button" id="fax" class="fax" disabled>Letter / fax (F)</button>
+  <button type="button" id="others" class="others" disabled>Others (O)</button>
+  <button type="button" id="next" disabled>Next</button>
+  <label>Folder <select id="jump-folder" disabled></select></label>
+  <label>Image <select id="jump-image" disabled></select></label>
+  <button type="button" id="jump" disabled>Go</button>
+  <label>Number <input id="jump-n" type="number" min="1" step="1" style="width:7em" disabled></label>
+  <button type="button" id="jump-num" disabled>Go to number</button>
+  <span class="muted">Enter saves this page and opens the next. Press a chosen key again to clear it.</span>
+  <span id="toast" class="muted"></span>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const page = $("page");
+const MARKS = {
+  keep: {value: "KEEP", subtype: null},
+  blank: {value: "BLANK", subtype: null},
+  invoice: {value: "JUNK", subtype: "JUNK_INVOICE"},
+  cover: {value: "JUNK", subtype: "JUNK_COVER_PAGE"},
+  request: {value: "JUNK", subtype: "JUNK_RECORD_REQUEST"},
+  instructions: {value: "JUNK", subtype: "JUNK_INSTRUCTIONS"},
+  fax: {value: "JUNK", subtype: "JUNK_LETTER_FAX"},
+  others: {value: "JUNK", subtype: "JUNK_OTHERS"},
+};
+const KEYS = {k: "keep", b: "blank", i: "invoice", c: "cover", r: "request", n: "instructions", f: "fax", o: "others"};
+let meta = null;
+let item = null;
+let index = 0;
+let busy = false;
+let imageReady = false;
+let dirty = false;
+
+function toast(text, isError) {
+  $("toast").textContent = text || "";
+  $("toast").className = isError ? "err" : "muted";
+}
+
+function sameMark(mark) {
+  return item && item.value === mark.value && (item.subtype || null) === mark.subtype;
+}
+
+function setChip() {
+  const chip = $("chip");
+  if (!item || !item.value) {
+    chip.textContent = "not labeled";
+    chip.className = "chip none";
+  } else if (item.value === "JUNK") {
+    const name = Object.entries(MARKS).find(([, mark]) => mark.subtype === item.subtype);
+    chip.textContent = "JUNK / " + (name ? $(name[0]).textContent.replace(/\s+\(.+\)$/, "") : item.subtype);
+    chip.className = "chip junk";
+  } else {
+    chip.textContent = item.value;
+    chip.className = "chip " + item.value.toLowerCase();
+  }
+  for (const [id, mark] of Object.entries(MARKS)) $(id).classList.toggle("on", sameMark(mark));
+}
+
+function buttons(on) {
+  const atStart = !meta || index <= 0;
+  const atEnd = !meta || index >= meta.total - 1;
+  const firstFolder = !item || item.folder_number <= 1;
+  for (const id of [...Object.keys(MARKS), "jump", "jump-num", "jump-folder", "jump-n"]) $(id).disabled = !on;
+  $("back").disabled = !on || atStart;
+  $("next").disabled = !on || atEnd;
+  $("prev-folder").disabled = !on || firstFolder;
+  $("jump-image").disabled = !on || !$("jump-folder").value;
+}
+
+async function loadMeta() {
+  const res = await fetch("/api/meta");
+  const body = await res.json();
+  if (!body.ready) return false;
+  if (body.error) {
+    $("status").textContent = body.error;
+    $("status").hidden = false;
+    return true;
+  }
+  meta = body;
+  const saved = Number(localStorage.getItem("bjc_index"));
+  const start = Number.isInteger(saved) && saved >= 0 && saved < meta.total ? saved : meta.resume_index;
+  fillFolders();
+  await show(start);
+  return true;
+}
+
+function fillFolders() {
+  const sel = $("jump-folder");
+  sel.innerHTML = "";
+  for (const folder of meta.folders) {
+    const opt = document.createElement("option");
+    opt.value = folder.name;
+    opt.textContent = `${folder.name} (${folder.count})`;
+    sel.appendChild(opt);
+  }
+}
+
+async function fillImages(folder) {
+  const sel = $("jump-image");
+  sel.innerHTML = "";
+  if (!folder) return;
+  const res = await fetch("/api/folder?name=" + encodeURIComponent(folder));
+  const body = await res.json();
+  for (const image of body.images || []) {
+    const opt = document.createElement("option");
+    opt.value = String(image.index);
+    opt.textContent = image.image_name + (image.summary ? " — " + image.summary : "");
+    sel.appendChild(opt);
+  }
+}
+
+async function show(nextIndex) {
+  if (!meta || meta.total === 0) {
+    $("status").hidden = false;
+    $("status").textContent = "No images under that prefix. Check CONTAINER_NAME, PREFIX, and START_FROM in main.py.";
+    page.hidden = true;
+    return;
+  }
+  index = Math.max(0, Math.min(meta.total - 1, nextIndex));
+  localStorage.setItem("bjc_index", String(index));
+  imageReady = false;
+  dirty = false;
+  buttons(false);
+  const res = await fetch("/api/item?index=" + index);
+  item = await res.json();
+  $("where").textContent = `${item.folder} / ${item.image_name}`;
+  $("progress").textContent =
+    `Folder ${item.folder_number} of ${item.folder_count} · ` +
+    `image ${item.image_in_folder} of ${item.images_in_folder} · ` +
+    `overall ${index + 1} of ${item.total} · ${meta.labeled} labeled · CSV ${meta.csv_path}`;
+  setChip();
+  $("jump-n").value = String(index + 1);
+  $("jump-n").max = String(meta.total);
+  if ($("jump-folder").value !== item.folder) {
+    $("jump-folder").value = item.folder;
+    await fillImages(item.folder);
+  }
+  const opt = [...$("jump-image").options].find((o) => o.value === String(index));
+  if (opt) $("jump-image").value = String(index);
+  $("status").hidden = false;
+  $("status").textContent = "Loading image…";
+  page.hidden = true;
+  page.src = "/image?index=" + index + "&t=" + Date.now();
+}
+
+page.onload = () => {
+  imageReady = true;
+  page.hidden = false;
+  $("status").hidden = true;
+  buttons(true);
+};
+page.onerror = () => {
+  imageReady = false;
+  page.hidden = true;
+  $("status").hidden = false;
+  $("status").textContent = "Could not load this image from blob.";
+  buttons(true);
+  for (const id of Object.keys(MARKS)) $(id).disabled = true;
+};
+
+function choose(id) {
+  if (!item || !imageReady || busy) return;
+  const mark = MARKS[id];
+  if (sameMark(mark)) {
+    item.value = null;
+    item.subtype = null;
+  } else {
+    item.value = mark.value;
+    item.subtype = mark.subtype;
+  }
+  dirty = true;
+  setChip();
+}
+
+async function persist() {
+  if (busy || !item || !imageReady) return false;
+  busy = true;
+  buttons(false);
+  toast("Saving…");
+  try {
+    const res = await fetch("/api/label", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        folder: item.folder,
+        image_name: item.image_name,
+        value: item.value,
+        subtype: item.subtype,
+      }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    meta.labeled = body.labeled;
+    item.value = body.value;
+    item.subtype = body.subtype;
+    item.saved = true;
+    dirty = false;
+    setChip();
+    const opt = [...$("jump-image").options].find((o) => o.value === String(index));
+    if (opt) opt.textContent = item.image_name + " — " + (body.summary || "—");
+    toast(body.summary || "Saved");
+    buttons(true);
+    return true;
+  } catch (err) {
+    toast(String(err.message || err), true);
+    buttons(true);
+    return false;
+  } finally {
+    busy = false;
+  }
+}
+
+async function go(nextIndex) {
+  if (!meta || busy) return;
+  if (dirty) {
+    const ok = await persist();
+    if (!ok) return;
+  }
+  await show(nextIndex);
+}
+
+async function confirmPage() {
+  if (!meta || busy || !item || !imageReady) return;
+  const ok = await persist();
+  if (!ok) return;
+  if (index < meta.total - 1) await show(index + 1);
+}
+
+function typingTarget(event) {
+  const tag = (event.target.tagName || "").toLowerCase();
+  return tag === "input" || tag === "select" || tag === "textarea";
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.repeat || typingTarget(event) || !meta) return;
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (KEYS[key]) { event.preventDefault(); choose(KEYS[key]); }
+  else if (key === "Enter" || key === "ArrowRight") { event.preventDefault(); confirmPage(); }
+  else if (key === "ArrowLeft") { event.preventDefault(); if (index > 0) go(index - 1); }
+  else if (key === "ArrowUp") { event.preventDefault(); previousFolder(); }
+});
+
+for (const id of Object.keys(MARKS)) $(id).onclick = () => choose(id);
+$("back").onclick = () => { if (index > 0) go(index - 1); };
+$("next").onclick = () => confirmPage();
+function previousFolder() {
+  if (!item || item.folder_number <= 1) return;
+  go(meta.folders[item.folder_number - 2].start);
+}
+$("prev-folder").onclick = previousFolder;
+$("jump-folder").onchange = () => fillImages($("jump-folder").value);
+$("jump").onclick = () => {
+  const value = $("jump-image").value;
+  if (value !== "") go(Number(value));
+};
+$("jump-num").onclick = () => {
+  const n = Number($("jump-n").value);
+  if (Number.isInteger(n) && n >= 1 && n <= meta.total) go(n - 1);
+  else toast("Image number must be from 1 to " + meta.total, true);
+};
+$("jump-n").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); $("jump-num").click(); }
+});
+
+(async function poll() {
+  try {
+    const done = await loadMeta();
+    if (!done) setTimeout(poll, 1000);
+  } catch (err) {
+    $("status").textContent = String(err.message || err);
+    setTimeout(poll, 2000);
+  }
+})();
+</script>
+</body>
+</html>
