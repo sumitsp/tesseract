@@ -29,6 +29,8 @@ COLUMNS = [
     "Effective Resolution",
     "Document Type",
     "P(Handwritten)",
+    "Visibility",
+    "Handwritten Area %",
     "Document Type Method",
     "Final Status",
     "Error",

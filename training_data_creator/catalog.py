@@ -1,4 +1,4 @@
-"""Chart images in a blob prefix: folder 1 image 1, folder 1 image 2, then folder 2."""
+"""Chart images from a local folder or a blob prefix: folder 1 image 1, then image 2, then folder 2."""
 
 from __future__ import annotations
 
@@ -91,10 +91,26 @@ def list_images(container: Any, prefix: str, start_from: str = "") -> list[Image
     return kept
 
 
-def read_blob_image(container: Any, item: ImageItem) -> tuple[bytes, str]:
-    """Return display bytes. JPEG/PNG/GIF/WEBP pass through; TIFF and BMP become PNG."""
-    data = container.download_blob(item.blob_name).readall()
-    suffix = Path(item.image_name).suffix.lower()
+def list_local_images(input_path: Path, start_from: str = "") -> list[ImageItem]:
+    """Images under a folder. The parent folder name is the chart folder."""
+    path = Path(input_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"LOCAL_INPUT does not exist: {path}")
+    if path.is_file():
+        files = [path] if path.suffix.lower() in IMAGE_EXTENSIONS else []
+    else:
+        files = [p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+    files.sort(key=lambda p: (str(p.parent).lower(), _natural_key(p.name)))
+    items = [ImageItem(p.parent.name, p.name, str(p)) for p in files]
+    LOGGER.info("%s images in %s folders under %s", len(items), len({item.folder for item in items}), path)
+    kept = apply_start_from(items, start_from)
+    if kept is not items:
+        LOGGER.info("%s images from folder %s onward", len(kept), (start_from or "").strip())
+    return kept
+
+
+def _as_display(data: bytes, suffix: str) -> tuple[bytes, str]:
+    """JPEG/PNG/GIF/WEBP pass through; TIFF and BMP become PNG."""
     media = _PASSTHROUGH.get(suffix)
     if media is not None:
         return data, media
@@ -107,3 +123,13 @@ def read_blob_image(container: Any, item: ImageItem) -> tuple[bytes, str]:
         out = io.BytesIO()
         frame.save(out, format="PNG")
     return out.getvalue(), "image/png"
+
+
+def read_local_image(item: ImageItem) -> tuple[bytes, str]:
+    data = Path(item.blob_name).read_bytes()
+    return _as_display(data, Path(item.image_name).suffix.lower())
+
+
+def read_blob_image(container: Any, item: ImageItem) -> tuple[bytes, str]:
+    data = container.download_blob(item.blob_name).readall()
+    return _as_display(data, Path(item.image_name).suffix.lower())

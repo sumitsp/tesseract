@@ -1,6 +1,6 @@
 # training_data_creator
 
-Label chart images from Azure Blob as Handwritten or Printed. The page runs on this machine. Images are read from blob. The CSV is written locally.
+Label chart images as Handwritten or Printed. The page runs on this machine. Images are read from a local folder or from Azure Blob. The CSV is written locally.
 
 Each row is one image: `value` (Handwritten, Printed, Form, Visual, Blank, or Uncertain), `visibility` (Visible or Not visible), and `handwritten percent` (the drawn box as a percentage of the page, or 0 when no box is drawn). Labeling it again updates that row.
 
@@ -13,7 +13,9 @@ az login
 
 Edit the RUN CONFIG block at the top of `main.py`:
 
-- `CONTAINER_NAME` and `PREFIX` (`PREFIX/<chart folder>/<image>`). The account is `azsadve2aipoc`.
+- `INPUT_SOURCE`: `"local"` or `"blob"`.
+- Local: `LOCAL_INPUT` is the folder that contains the chart folders, so `LOCAL_INPUT\<folder name>\<image name>` is the file.
+- Blob: `CONTAINER_NAME` and `PREFIX` (`PREFIX/<chart folder>/<image>`). The account is `azsadve2aipoc`. Sign in with `az login` first.
 - `START_FROM`: leave empty to begin at the first folder. Set a folder name to begin at that folder and continue through the later folders.
 - `CSV_PATH`: where `training_labels.csv` is written. Close it in Excel while labeling, or a save will fail until you close it.
 

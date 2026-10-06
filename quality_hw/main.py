@@ -88,6 +88,8 @@ def process_page(page: Page, bundle: dict[str, Any]) -> dict[str, Any]:
         row.update({
             "Document Type": doc_type,
             "P(Handwritten)": dt.p_handwritten,
+            "Visibility": dt.visibility,
+            "Handwritten Area %": dt.handwritten_area,
             "Document Type Method": dt.method,
             "Error": dt.error,
         })
@@ -95,7 +97,7 @@ def process_page(page: Page, bundle: dict[str, Any]) -> dict[str, Any]:
             # Sharpness/contrast of an empty sheet say nothing about readability.
             row["Quality"] = "N/A"
             bad = False
-        review = bad or doc_type == "UNCERTAIN" or dt.error
+        review = bad or doc_type == "UNCERTAIN" or dt.visibility == "Not visible" or dt.error
         row["Final Status"] = "REVIEW_REQUIRED" if review else "OK"
 
         # Handwriting OCRs worse than print, so a clean handwritten page tops out at Medium.

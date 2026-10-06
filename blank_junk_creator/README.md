@@ -1,6 +1,6 @@
 # blank_junk_creator
 
-Label chart images from Azure Blob as Keep, Blank, or a junk subtype. The page runs on this machine. Images are read from blob. The CSV is written locally.
+Label chart images as Keep, Blank, or a junk subtype. The page runs on this machine. Images are read from a local folder or from Azure Blob. The CSV is written locally.
 
 Each row is one image: `value` (`KEEP`, `BLANK`, or `JUNK`) and `subtype` (empty for Keep and Blank; for Junk one of Invoice, Cover page, Record request, Instructions, Letter / fax, Others). Labeling it again updates that row. Empty fields are allowed.
 
@@ -13,7 +13,9 @@ az login
 
 Edit the RUN CONFIG block at the top of `main.py`:
 
-- `CONTAINER_NAME` and `PREFIX` (`PREFIX/<chart folder>/<image>`). The account is `azsadve2aipoc`.
+- `INPUT_SOURCE`: `"local"` or `"blob"`.
+- Local: `LOCAL_INPUT` is the folder that contains the chart folders, so `LOCAL_INPUT\<folder name>\<image name>` is the file.
+- Blob: `CONTAINER_NAME` and `PREFIX` (`PREFIX/<chart folder>/<image>`). The account is `azsadve2aipoc`. Sign in with `az login` first.
 - `START_FROM`: leave empty to begin at the first folder. Set a folder name to begin at that folder and continue through the later folders.
 - `CSV_PATH`: where `blank_junk_labels.csv` is written. Close it in Excel while labeling, or a save will fail until you close it.
 

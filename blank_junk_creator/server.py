@@ -1,4 +1,4 @@
-"""Localhost labeling server. Images come from blob; the CSV stays on this machine."""
+"""Localhost labeling server. Images come from a local folder or blob; the CSV stays on this machine."""
 
 from __future__ import annotations
 

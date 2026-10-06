@@ -31,9 +31,11 @@ Edit the RUN CONFIG block at the top of `main.py`:
 python quality_hw/main.py
 ```
 
-## Retrain printed / handwritten
+## Retrain
 
-Blank pages are not trained. They are not in the labeling CSV. At run time, `main.py` still marks a page `BLANK` from the image before the model runs.
+The label CSV can mark a page Printed, Handwritten, Form, Visual, Blank, or Uncertain, plus Visible or Not visible, plus a handwritten-area percentage. A blank percentage stays blank. It is not stored as zero.
+
+Empty scanner pages are still marked `BLANK` from the image before the model runs. The model learns Blank for the pages you labeled that way.
 
 Edit `LABELS_CSV` and `IMAGES_DIR` at the top of `make_manifest.py`. `IMAGES_DIR` is the folder that contains the chart folders, so `IMAGES_DIR\<folder name>\<image name>` is the file.
 
@@ -44,4 +46,4 @@ python quality_hw/train.py
 
 `make_manifest.py` prints how many rows it wrote and how many image files were missing. Missing should be 0. `train.py` trains for 6 epochs and replaces `quality_hw/models/page_printed_handwritten_convnext_tiny.pth`. The first run downloads the ImageNet starting weights, so it needs a network. A GPU finishes in well under an hour. CPU takes a few hours.
 
-Then run `python quality_hw/main.py` as usual. The new model decides Printed vs Handwritten at 0.5. The blank check is unchanged.
+Then run `python quality_hw/main.py` as usual. The report adds Visibility and Handwritten Area %. The current two-class model still loads until this retrain replaces it.

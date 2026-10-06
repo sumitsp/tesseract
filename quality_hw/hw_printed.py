@@ -17,12 +17,14 @@ from torchvision.models import convnext_tiny
 
 @dataclass
 class PageTypeResult:
-    document_type: str  # PRINTED | HANDWRITTEN | UNCERTAIN
+    document_type: str  # PRINTED | HANDWRITTEN | FORM | VISUAL | BLANK | UNCERTAIN
     method: str
     p_handwritten: float | None
     region_count: int = 0
     region_labels: dict[str, Any] | None = None
     error: str | None = None
+    visibility: str | None = None
+    handwritten_area: float | None = None
 
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
@@ -31,6 +33,9 @@ METHOD_NAME = "page_convnext_tiny"
 HYBRID_METHOD = "page_convnext_plus_ink"
 
 INDEX_TO_CLASS = {0: "Printed", 1: "Handwritten"}
+PAGE_TAGS = ("Printed", "Handwritten", "Form", "Visual", "Blank", "Uncertain")
+VISIBILITY_TAGS = ("Visible", "Not visible")
+TAG_TASK = "page_tags"
 
 # Page model alone is printed-heavy on filled forms.
 DEFAULT_DECISION_THRESHOLD = 0.28
@@ -196,6 +201,25 @@ def _build_model() -> nn.Module:
     return model
 
 
+class PageTagModel(nn.Module):
+    """Page type, visibility, and the fraction of the page that is writing."""
+
+    def __init__(self, weights=None) -> None:
+        super().__init__()
+        net = convnext_tiny(weights=weights)
+        in_features = net.classifier[2].in_features
+        net.classifier[2] = nn.Identity()
+        self.backbone = net
+        self.type_head = nn.Linear(in_features, len(PAGE_TAGS))
+        self.visible_head = nn.Linear(in_features, len(VISIBILITY_TAGS))
+        self.area_head = nn.Linear(in_features, 1)
+
+    def forward(self, x: torch.Tensor):
+        feat = self.backbone(x)
+        area = torch.sigmoid(self.area_head(feat).squeeze(-1))
+        return self.type_head(feat), self.visible_head(feat), area
+
+
 def load_page_classifier(model_path: Path | None = None) -> dict[str, Any]:
     path = Path(model_path) if model_path is not None else DEFAULT_PAGE_MODEL
     if not path.is_file():
@@ -204,13 +228,22 @@ def load_page_classifier(model_path: Path | None = None) -> dict[str, Any]:
         raise FileNotFoundError(f"{path} is a Git LFS pointer, not the model. Run: git lfs pull")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model = _build_model()
+    task = ckpt.get("task") or ""
+    if task == TAG_TASK:
+        model = PageTagModel(weights=None)
+    else:
+        model = _build_model()
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
     model.eval()
+    classes = ckpt.get("classes") or INDEX_TO_CLASS
+    if isinstance(classes, dict):
+        classes = {int(k): v for k, v in classes.items()}
     return {
         "model": model,
         "device": device,
+        "task": task,
+        "classes": classes,
         "image_size": int(ckpt.get("image_size") or 224),
         "mean": tuple(ckpt.get("normalize_mean") or (0.485, 0.456, 0.406)),
         "std": tuple(ckpt.get("normalize_std") or (0.229, 0.224, 0.225)),
@@ -262,6 +295,8 @@ def classify_page_convnext(
             )
         model_bundle = bundle if bundle is not None else load_page_classifier()
         tensor = _preprocess(image_bgr, model_bundle).to(model_bundle["device"])
+        if model_bundle.get("task") == TAG_TASK:
+            return _classify_tags(tensor, model_bundle)
         with torch.inference_mode():
             logits = model_bundle["model"](tensor)
             proba = torch.softmax(logits, dim=-1)[0]
@@ -296,6 +331,30 @@ def classify_page_convnext(
         )
 
 
+def _classify_tags(tensor: torch.Tensor, bundle: dict[str, Any]) -> PageTypeResult:
+    with torch.inference_mode():
+        type_logits, vis_logits, area = bundle["model"](tensor)
+        type_proba = torch.softmax(type_logits, dim=-1)[0]
+        vis_proba = torch.softmax(vis_logits, dim=-1)[0]
+    classes = bundle["classes"]
+    top = int(type_proba.argmax().item())
+    name = classes.get(top, PAGE_TAGS[top])
+    conf = float(type_proba[top].item())
+    hw_index = next(i for i, label in classes.items() if label == "Handwritten")
+    p_hw = float(type_proba[hw_index].item())
+    label = name.upper()
+    if conf < float(bundle["uncertain_min_confidence"]) and label != "UNCERTAIN":
+        label = "UNCERTAIN"
+    vis_top = int(vis_proba.argmax().item())
+    return PageTypeResult(
+        document_type=label,
+        method=METHOD_NAME,
+        p_handwritten=round(p_hw, 4),
+        visibility=VISIBILITY_TAGS[vis_top],
+        handwritten_area=round(float(area[0].item()) * 100.0, 1),
+    )
+
+
 def classify_page_hybrid(
     image_bgr: np.ndarray,
     bundle: dict[str, Any] | None = None,
@@ -303,7 +362,12 @@ def classify_page_hybrid(
     """Page ConvNeXt first; ink evidence upgrades filled forms to HANDWRITTEN."""
     model_bundle = bundle if bundle is not None else load_hybrid_classifier()
     page = classify_page_convnext(image_bgr, bundle=model_bundle)
-    if page.error or page.document_type == "HANDWRITTEN" or page.method in {BLANK_METHOD, FAINT_METHOD}:
+    if (
+        page.error
+        or model_bundle.get("task") == TAG_TASK
+        or page.document_type == "HANDWRITTEN"
+        or page.method in {BLANK_METHOD, FAINT_METHOD}
+    ):
         return page
 
     ink = handwriting_ink_evidence(image_bgr)

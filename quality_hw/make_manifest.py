@@ -1,7 +1,8 @@
 """Turn the labeling CSV plus the downloaded image folders into manifest.csv.
 
-A row is kept only when the image file exists and the value is Printed or
-Handwritten. Blank pages are not in the labeling CSV, so they are not here.
+Every labeled page type is kept: Printed, Handwritten, Form, Visual, Blank,
+Uncertain. Visibility and the handwritten-area percentage are kept when the
+labeler filled them in, and left blank when they were not.
 
 Edit RUN CONFIG, then run:  python quality_hw/make_manifest.py
 """
@@ -13,7 +14,7 @@ import sys
 from pathlib import Path
 
 # ============================== RUN CONFIG ==============================
-# The CSV from training_data_creator (folder name, image name, value).
+# The CSV from training_data_creator.
 LABELS_CSV = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\training_labels.csv")
 
 # The folder that contains the chart folders, so this file exists:
@@ -24,8 +25,9 @@ IMAGES_DIR = Path(r"C:\Users\sumit.pandey\Desktop\Imaging\images")
 MANIFEST_PATH = IMAGES_DIR / "manifest.csv"
 # ========================================================================
 
-LABELS = {"Printed", "Handwritten"}
-COLUMNS = ["path", "label", "source", "origin"]
+LABELS = {"Printed", "Handwritten", "Form", "Visual", "Blank", "Uncertain"}
+VISIBILITY = {"Visible", "Not visible"}
+COLUMNS = ["path", "label", "visibility", "handwritten_percent", "source", "origin"]
 
 
 def build_manifest(labels_csv: Path = LABELS_CSV, images_dir: Path = IMAGES_DIR, manifest_path: Path = MANIFEST_PATH) -> tuple[int, int, int]:
@@ -46,14 +48,31 @@ def build_manifest(labels_csv: Path = LABELS_CSV, images_dir: Path = IMAGES_DIR,
             folder = (row.get("folder name") or "").strip()
             name = (row.get("image name") or "").strip()
             value = (row.get("value") or "").strip()
+            visibility = (row.get("visibility") or "").strip()
+            percent = (row.get("handwritten percent") or "").strip()
             if not folder or not name or value not in LABELS:
                 skipped += 1
                 continue
+            if visibility not in VISIBILITY:
+                visibility = ""
+            if percent:
+                try:
+                    number = float(percent)
+                except ValueError:
+                    number = None
+                percent = "" if number is None or number < 0 or number > 100 else f"{number:.4f}".rstrip("0").rstrip(".")
             rel = Path(folder) / name
             if not (images_dir / rel).is_file():
                 missing += 1
                 continue
-            rows.append({"path": rel.as_posix(), "label": value, "source": "labeled", "origin": name})
+            rows.append({
+                "path": rel.as_posix(),
+                "label": value,
+                "visibility": visibility,
+                "handwritten_percent": percent,
+                "source": "labeled",
+                "origin": name,
+            })
 
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with manifest_path.open("w", newline="", encoding="utf-8") as fh:
