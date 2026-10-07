@@ -21,6 +21,14 @@ Edit the RUN CONFIG block at the top of `main.py`:
 
 ## Run
 
+From inside this folder:
+
+```bash
+python main.py
+```
+
+From the project folder it is the same file:
+
 ```bash
 python training_data_creator/main.py
 ```

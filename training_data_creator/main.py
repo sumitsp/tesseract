@@ -11,18 +11,18 @@ import sys
 import threading
 from pathlib import Path
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# This folder can be copied on its own. Load the files next to main.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from training_data_creator.catalog import (
+from catalog import (
     connect_container,
     list_images,
     list_local_images,
     read_blob_image,
     read_local_image,
 )
-from training_data_creator.labels import LabelStore
-from training_data_creator.server import App, serve
+from labels import LabelStore
+from server import App, serve
 
 # ============================== RUN CONFIG ==============================
 INPUT_SOURCE = "local"  # "local" or "blob"

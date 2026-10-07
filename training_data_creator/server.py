@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from training_data_creator.catalog import ImageItem
-from training_data_creator.labels import TYPES, VISIBILITY, LabelStore
+from catalog import ImageItem
+from labels import TYPES, VISIBILITY, LabelStore
 
 LOGGER = logging.getLogger("training_data_creator")
 _PAGE = Path(__file__).resolve().parent / "static" / "index.html"
