@@ -216,25 +216,42 @@ def length_batches(examples: list[Example], batch_size: int, rng: random.Random)
     return batches
 
 
-def train_model(train: list[Example], cfg: dict, device, *, epochs: int, base_model: str, tag: str):
+def train_model(
+    train: list[Example],
+    cfg: dict,
+    device,
+    *,
+    epochs: int,
+    base_model: str,
+    tag: str,
+    resume_dir: Path | None = None,
+    learning_rate: float | None = None,
+    keep_weight: float | None = None,
+):
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
 
     bc = cfg["bert"]
     seed_all(bc["seed"])
     rng = random.Random(bc["seed"])
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        base_model,
-        num_labels=len(BERT_LABELS),
-        id2label=dict(enumerate(BERT_LABELS)),
-        label2id=LABEL_INDEX,
-    ).to(device)
+    if resume_dir is not None:
+        print(f"[{tag}] continuing from saved model {resume_dir}", flush=True)
+        tokenizer = AutoTokenizer.from_pretrained(str(resume_dir))
+        model = AutoModelForSequenceClassification.from_pretrained(str(resume_dir)).to(device)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(base_model)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            base_model,
+            num_labels=len(BERT_LABELS),
+            id2label=dict(enumerate(BERT_LABELS)),
+            label2id=LABEL_INDEX,
+        ).to(device)
 
     weights = torch.ones(len(BERT_LABELS))
-    weights[LABEL_INDEX["KEEP"]] = float(bc["keep_weight"])
+    weights[LABEL_INDEX["KEEP"]] = float(bc["keep_weight"] if keep_weight is None else keep_weight)
     loss_fn = torch.nn.CrossEntropyLoss(weight=weights.to(device))
-    optim = torch.optim.AdamW(model.parameters(), lr=float(bc["learning_rate"]), weight_decay=float(bc["weight_decay"]))
+    lr = float(bc["learning_rate"] if learning_rate is None else learning_rate)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=float(bc["weight_decay"]))
     steps_per_epoch = math.ceil(len(train) / bc["batch_size"])
     total = steps_per_epoch * epochs
     sched = get_linear_schedule_with_warmup(optim, int(total * float(bc["warmup_ratio"])), total)
@@ -359,6 +376,41 @@ def free(model) -> None:
         torch.cuda.empty_cache()
 
 
+def continue_saved_model(cfg: dict, device, epochs: int) -> int:
+    """Train the already-saved model on the new annotated pages and save it again."""
+    bc = cfg["bert"]
+    model_dir = ROOT / bc["model_dir"]
+    if not (model_dir / "bjnk_meta.json").is_file():
+        raise SystemExit(f"No saved model at {model_dir}")
+    annotated = annotated_examples(cfg)
+    if not annotated:
+        raise SystemExit(f"No annotated pages in {ROOT / bc.get('annotated_jsonl', 'data/raw/annotated_pages.jsonl')}")
+    # A short, small step. The saved weights stay; these pages nudge them.
+    epochs = min(epochs, 2)
+    model, tok = train_model(
+        annotated, cfg, device, epochs=epochs, base_model=bc["base_model"], tag="continue",
+        resume_dir=model_dir, learning_rate=1e-5, keep_weight=1.0,
+    )
+    out_dir = model_dir
+    tmp_dir = out_dir.with_name(out_dir.name + ".tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    meta = json.loads((model_dir / "bjnk_meta.json").read_text(encoding="utf-8"))
+    meta.update({
+        "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "continued_from": str(model_dir),
+        "continue_epochs": epochs,
+        "continue_pages": len(annotated),
+        "continue_labels": dict(collections.Counter(e.label for e in annotated)),
+    })
+    save_bert(model, tok, tmp_dir, meta)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    tmp_dir.rename(out_dir)
+    print(f"\nSaved continued model -> {out_dir}", flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(ROOT / "configs" / "default.json"))
@@ -368,6 +420,8 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--skip-eval", action="store_true")
     mode.add_argument("--eval-only", action="store_true")
+    mode.add_argument("--continue-model", action="store_true",
+                      help="Keep models/bert_page and train it further on the annotated pages")
     args = ap.parse_args()
 
     cfg = _load_cfg(Path(args.config))
@@ -376,6 +430,9 @@ def main() -> int:
     base_model = args.base_model or bc["base_model"]
     device = pick_device(args.device)
     print(f"device={device} base_model={base_model} epochs={epochs}", flush=True)
+
+    if args.continue_model:
+        return continue_saved_model(cfg, device, epochs)
 
     synth = synthetic_examples(cfg)
     real = real_examples(cfg)
