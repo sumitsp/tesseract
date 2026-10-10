@@ -52,7 +52,7 @@ decision:
   # trigger phrase of that subtype. JUNK_INVOICE does not need the phrase: a billing
   # page always has a name and DOB, and the model call at >= 0.95 is the decision.
   # Clinical images are never overruled.
-  demographic_override_labels: [JUNK_RECORD_REQUEST, JUNK_INSTRUCTIONS, JUNK_LETTER_FAX, JUNK_INVOICE]
+  demographic_override_labels: [JUNK_RECORD_REQUEST, JUNK_INSTRUCTIONS, JUNK_LETTER_FAX, JUNK_COVER_PAGE, JUNK_INVOICE]
   demographic_override_min_prob: 0.95
   demographic_override_needs_trigger: true  # confidence alone flagged an EMR index page
   demographic_override_no_trigger_labels: [JUNK_INVOICE]

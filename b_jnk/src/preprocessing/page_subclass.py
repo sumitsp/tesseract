@@ -2,8 +2,9 @@
 
 The model decides KEEP vs BLANK vs JUNK. These rules name the subtype of a
 page that is already BLANK or JUNK, so training labels and inference subtypes
-always agree. The invoice rule is the exception: one strong billing phrase,
-or two weak ones, marks the page JUNK_INVOICE. When a page carries triggers of several subtypes, its main
+always agree. Three rules also set the flag to JUNK: a billing phrase
+(JUNK_INVOICE), a cover-page phrase (JUNK_COVER_PAGE), and a letter or fax
+phrase (JUNK_LETTER_FAX). When a page carries triggers of several subtypes, its main
 purpose wins: the subtype named first in the page heading, else the one with
 the most triggers. The typology list order (Invoice, Cover Page, Record
 Request, Instructions, Letter/Fax, Others) only breaks exact ties.
@@ -40,8 +41,17 @@ INVOICE_WEAK = (
     "bill to", "ship to", "unit price", "charge description", "payments received",
     "revenue reconciliation",
 )
+# "accept" is a stamp on a short separator. On a long note it is the verb "accepted".
+COVER_ANY_LENGTH = ("cover page", "cover sheet")
+COVER_SHORT_ONLY = ("accept", "unaccept")
+# Openings and fax shells. A visit note that only says "please find attached"
+# next to a clinical section is not a letter.
+LETTER_SOFT = (
+    "please find attached", "please find the attached",
+    "dear doctor", "dear dr", "dear provider",
+)
 TRIGGERS: dict[str, tuple[str, ...]] = {
-    "JUNK_COVER_PAGE": ("accept", "unaccept", "cover page"),
+    "JUNK_COVER_PAGE": COVER_ANY_LENGTH + COVER_SHORT_ONLY,
     "JUNK_RECORD_REQUEST": (
         "medical records request", "records requested", "transmittal sheet", "records attached",
         "risk adjustment request", "audit fulfillment",
@@ -53,7 +63,9 @@ TRIGGERS: dict[str, tuple[str, ...]] = {
     ),
     "JUNK_LETTER_FAX": (
         "cover letter", "fax transmission", "fax cover", "facsimile", "fax sheet", "this fax",
-        "intended recipient",
+        "intended recipient", "this message is intended", "if you have received this",
+        "to whom it may concern", "dear sir", "dear madam",
+        *LETTER_SOFT,
     ),
 }
 PROXIMITY_NAME = "records~request"
@@ -153,11 +165,17 @@ def _candidate_hits(text: str) -> dict[str, list[str]]:
         # on a visit stays a visit.
         if not (set(hits) <= {"billing"} and CLINICAL_SECTION_RE.search(text or "")):
             out["JUNK_INVOICE"] = hits
-    if groups["JUNK_COVER_PAGE"] and word_count(text) <= SHORT_PAGE_MAX_WORDS:
-        out["JUNK_COVER_PAGE"] = groups["JUNK_COVER_PAGE"]
-    for s in ("JUNK_RECORD_REQUEST", "JUNK_INSTRUCTIONS", "JUNK_LETTER_FAX"):
-        if groups[s]:
-            out[s] = groups[s]
+    cover = list(groups["JUNK_COVER_PAGE"])
+    if word_count(text) > SHORT_PAGE_MAX_WORDS:
+        cover = [phrase for phrase in cover if phrase in COVER_ANY_LENGTH]
+    if cover:
+        out["JUNK_COVER_PAGE"] = cover
+    for subtype in ("JUNK_RECORD_REQUEST", "JUNK_INSTRUCTIONS", "JUNK_LETTER_FAX"):
+        if groups[subtype]:
+            out[subtype] = groups[subtype]
+    letter = out.get("JUNK_LETTER_FAX") or []
+    if letter and set(letter) <= set(LETTER_SOFT) and CLINICAL_SECTION_RE.search(text or ""):
+        del out["JUNK_LETTER_FAX"]
     return out
 
 
@@ -175,6 +193,29 @@ def invoice_page_reason(text: str) -> str | None:
     if set(hits) <= {"billing"} and CLINICAL_SECTION_RE.search(text or ""):
         return None
     return hits[0]
+
+
+def shell_page_reason(text: str) -> tuple[str, str] | None:
+    """Cover sheet or letter/fax rule. Returns (subtype, phrase) or nothing.
+
+    A cover sheet says cover page or cover sheet at any length. Accept and
+    unaccept count only on a short page. A letter or fax says one of the
+    letter phrases. A clinical note is left alone when the only hit is a soft
+    opening such as "please find attached".
+    """
+    chosen = {
+        subtype: hits
+        for subtype, hits in _candidate_hits(text).items()
+        if subtype in {"JUNK_COVER_PAGE", "JUNK_LETTER_FAX"}
+    }
+    if not chosen:
+        return None
+    if len(chosen) == 1:
+        subtype, hits = next(iter(chosen.items()))
+        return subtype, hits[0]
+    subtype, reason = main_purpose(text, chosen)
+    phrase = reason.split(":", 1)[-1]
+    return subtype, phrase
 
 
 def junk_trigger_groups(text: str) -> list[str]:

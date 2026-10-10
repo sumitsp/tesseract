@@ -37,6 +37,7 @@ class DecisionConfig:
         "JUNK_RECORD_REQUEST",
         "JUNK_INSTRUCTIONS",
         "JUNK_LETTER_FAX",
+        "JUNK_COVER_PAGE",
         "JUNK_INVOICE",
     )
     demographic_override_min_prob: float = 0.95
