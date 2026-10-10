@@ -137,7 +137,11 @@ def new_annotated(annotated: list[Example], already: list[Example]) -> tuple[lis
 
 
 def real_examples(cfg: dict) -> list[Example]:
-    rows = load_jsonl(ROOT / cfg["paths"]["raw_jsonl"])
+    path = ROOT / cfg["paths"]["raw_jsonl"]
+    if not path.is_file():
+        print(f"real pages file not on this machine: {path}", flush=True)
+        return []
+    rows = load_jsonl(path)
     pool = filter_training_rows(
         rows,
         require_train_eligible=cfg["training"]["require_train_eligible"],
