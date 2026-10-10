@@ -2,9 +2,10 @@
 
 The model decides KEEP vs BLANK vs JUNK. These rules name the subtype of a
 page that is already BLANK or JUNK, so training labels and inference subtypes
-always agree. Three rules also set the flag to JUNK: a billing phrase
-(JUNK_INVOICE), a cover-page phrase (JUNK_COVER_PAGE), and a letter or fax
-phrase (JUNK_LETTER_FAX). When a page carries triggers of several subtypes, its main
+always agree. Four rules also set the flag to JUNK: a billing phrase
+(JUNK_INVOICE), a cover-page phrase (JUNK_COVER_PAGE), a letter or fax
+phrase (JUNK_LETTER_FAX), and a short closer such as "end of patient record"
+(JUNK_OTHERS). When a page carries triggers of several subtypes, its main
 purpose wins: the subtype named first in the page heading, else the one with
 the most triggers. The typology list order (Invoice, Cover Page, Record
 Request, Instructions, Letter/Fax, Others) only breaks exact ties.
@@ -31,6 +32,8 @@ BLANK_SUBTYPES = (
 )
 
 SHORT_PAGE_MAX_WORDS = 19
+# A closer is a name, this line, and a page number. A real note is longer.
+END_RECORD_MAX_WORDS = 40
 HEADING_WORDS = 30
 
 INVOICE_STRONG = (
@@ -49,6 +52,18 @@ COVER_SHORT_ONLY = ("accept", "unaccept")
 LETTER_SOFT = (
     "please find attached", "please find the attached",
     "dear doctor", "dear dr", "dear provider",
+)
+# The page itself is the end of the chart. Not "end of report": that line
+# sits under a real report.
+END_RECORD_PHRASES = (
+    "end of patient record",
+    "end of the patient record",
+    "end of patient's record",
+    "end of medical record",
+    "end of the medical record",
+    "end of chart",
+    "end of the chart",
+    "end of this record",
 )
 TRIGGERS: dict[str, tuple[str, ...]] = {
     "JUNK_COVER_PAGE": COVER_ANY_LENGTH + COVER_SHORT_ONLY,
@@ -119,7 +134,12 @@ def _phrase_re(phrase: str) -> re.Pattern[str]:
 
 MATCHERS: dict[str, re.Pattern[str]] = {
     p: _phrase_re(p)
-    for p in (*INVOICE_STRONG, *INVOICE_WEAK, *(q for v in TRIGGERS.values() for q in v))
+    for p in (
+        *INVOICE_STRONG,
+        *INVOICE_WEAK,
+        *END_RECORD_PHRASES,
+        *(q for v in TRIGGERS.values() for q in v),
+    )
 }
 
 
@@ -176,6 +196,11 @@ def _candidate_hits(text: str) -> dict[str, list[str]]:
     letter = out.get("JUNK_LETTER_FAX") or []
     if letter and set(letter) <= set(LETTER_SOFT) and CLINICAL_SECTION_RE.search(text or ""):
         del out["JUNK_LETTER_FAX"]
+    # Only when nothing more specific matched, so a bill or a cover keeps its name.
+    if not out and word_count(text) <= END_RECORD_MAX_WORDS:
+        hits = [p for p in END_RECORD_PHRASES if MATCHERS[p].search(text or "")]
+        if hits:
+            out["JUNK_OTHERS"] = hits
     return out
 
 
@@ -193,6 +218,19 @@ def invoice_page_reason(text: str) -> str | None:
     if set(hits) <= {"billing"} and CLINICAL_SECTION_RE.search(text or ""):
         return None
     return hits[0]
+
+
+def end_record_reason(text: str) -> str | None:
+    """Short closer: a name and "end of patient record", and little else.
+
+    A longer page that only has this line in the footer stays with the model.
+    """
+    if word_count(text) > END_RECORD_MAX_WORDS:
+        return None
+    for phrase in END_RECORD_PHRASES:
+        if MATCHERS[phrase].search(text or ""):
+            return phrase
+    return None
 
 
 def shell_page_reason(text: str) -> tuple[str, str] | None:

@@ -13,6 +13,7 @@ from src.preprocessing.page_subclass import (
     JUNK_SUBTYPES,
     assign_blank_subtype,
     assign_junk_subtype,
+    end_record_reason,
     invoice_page_reason,
     shell_page_reason,
     junk_trigger_groups,
@@ -111,6 +112,10 @@ class PageClassifierService:
                 review = route.reason == "gibberish_ocr"
             invoice_reason = None if hit.retain_clinical_image else invoice_page_reason(ocr_text)
             shell = None if hit.retain_clinical_image or invoice_reason else shell_page_reason(ocr_text)
+            closer = (
+                None if hit.retain_clinical_image or invoice_reason or shell
+                else end_record_reason(ocr_text)
+            )
             if invoice_reason:
                 flag = "JUNK"
                 audit = "JUNK_INVOICE"
@@ -121,6 +126,11 @@ class PageClassifierService:
                 audit = shell[0]
                 review = True
                 subclass, subclass_reason = shell[0], f"rule:{shell[1]}"
+            elif closer:
+                flag = "JUNK"
+                audit = "JUNK_OTHERS"
+                review = True
+                subclass, subclass_reason = "JUNK_OTHERS", f"rule:{closer}"
             elif route.reason == "gibberish_ocr" and flag == "JUNK":
                 subclass, subclass_reason = "JUNK_OTHERS", "gibberish"
             else:
@@ -139,12 +149,14 @@ class PageClassifierService:
                 top_evidence=(
                     f"invoice_rule:{invoice_reason}" if invoice_reason
                     else f"shell_rule:{shell[1]}" if shell
+                    else f"end_record_rule:{closer}" if closer
                     else route.reason
                 ) or "empty_or_unreadable_ocr",
                 model_version=self.model_version,
                 decision_reason=(
                     f"invoice_rule:{invoice_reason}" if invoice_reason
                     else f"shell_rule:{shell[0]}:{shell[1]}" if shell
+                    else f"end_record_rule:{closer}" if closer
                     else f"pre_model_route:{route.reason}"
                 ),
                 subclass=subclass,
@@ -179,6 +191,7 @@ class PageClassifierService:
         clinical_image = analyze_protocol(ocr_text).retain_clinical_image
         invoice_reason = None if clinical_image else invoice_page_reason(ocr_text)
         shell = None if clinical_image or invoice_reason else shell_page_reason(ocr_text)
+        closer = None if clinical_image or invoice_reason or shell else end_record_reason(ocr_text)
         if invoice_reason and flag != "JUNK":
             flag = "JUNK"
             review = True
@@ -189,19 +202,32 @@ class PageClassifierService:
             review = True
             reason = f"{reason}+shell_rule"
             evidence = [f"shell_rule:{shell[0]}:{shell[1]}"] + evidence
+        elif closer and flag != "JUNK":
+            flag = "JUNK"
+            review = True
+            reason = f"{reason}+end_record_rule"
+            evidence = [f"end_record_rule:{closer}"] + evidence
         else:
             shell = None
+            closer = None
 
         model_tag = _best_junk_label(labels, proba) or decision.audit_tag
         if invoice_reason:
             subclass, subclass_reason = "JUNK_INVOICE", f"rule:{invoice_reason}"
         elif shell:
             subclass, subclass_reason = shell[0], f"rule:{shell[1]}"
+        elif closer:
+            subclass, subclass_reason = "JUNK_OTHERS", f"rule:{closer}"
         else:
             subclass, subclass_reason = _subclass(
                 flag, ocr_text, model_tag=model_tag, structurally_empty=False
             )
-        audit = "JUNK_INVOICE" if invoice_reason else (shell[0] if shell else (decision.audit_tag or flag))
+        audit = (
+            "JUNK_INVOICE" if invoice_reason
+            else shell[0] if shell
+            else "JUNK_OTHERS" if closer
+            else (decision.audit_tag or flag)
+        )
         return InferenceResult(
             page_id=page_id,
             flag=flag,
