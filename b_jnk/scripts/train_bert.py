@@ -85,6 +85,57 @@ def synthetic_examples(cfg: dict) -> list[Example]:
     return out
 
 
+def _norm_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def annotated_examples(cfg: dict) -> list[Example]:
+    """Image labels joined to Document Intelligence text. Missing file = none."""
+    rel = cfg["bert"].get("annotated_jsonl") or "data/raw/annotated_pages.jsonl"
+    path = ROOT / rel
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        text = str(row.get("text") or "").strip()
+        label = str(row.get("label") or "")
+        if not text or label not in LABEL_INDEX:
+            continue
+        out.append(Example(
+            str(row.get("id") or ""),
+            text,
+            label,
+            "annotated",
+            group=str(row.get("group") or row.get("id") or ""),
+            reason="image_label",
+        ))
+    return out
+
+
+def new_annotated(annotated: list[Example], already: list[Example]) -> tuple[list[Example], int, int]:
+    """Drop a page whose text is already in training. A conflicting label is counted apart."""
+    seen: dict[str, set[str]] = {}
+    for example in already:
+        seen.setdefault(_norm_text(example.text), set()).add(example.label)
+    kept: list[Example] = []
+    conflicts = 0
+    duplicates = 0
+    for example in annotated:
+        labels = seen.get(_norm_text(example.text))
+        if not labels:
+            kept.append(example)
+            seen.setdefault(_norm_text(example.text), set()).add(example.label)
+            continue
+        if example.label in labels:
+            duplicates += 1
+        else:
+            conflicts += 1
+    return kept, duplicates, conflicts
+
+
 def real_examples(cfg: dict) -> list[Example]:
     rows = load_jsonl(ROOT / cfg["paths"]["raw_jsonl"])
     pool = filter_training_rows(
@@ -324,10 +375,15 @@ def main() -> int:
 
     synth = synthetic_examples(cfg)
     real = real_examples(cfg)
+    annotated, dupes, conflicts = new_annotated(annotated_examples(cfg), synth + real)
     assign_folds(real)
     labels_csv = write_real_labels(real)
     print(f"synthetic pages: {len(synth)} {dict(collections.Counter(e.label for e in synth))}")
     print(f"real pages:      {len(real)} {dict(collections.Counter(e.label for e in real))}")
+    print(
+        f"annotated pages: {len(annotated)} {dict(collections.Counter(e.label for e in annotated))} "
+        f"(skipped {dupes} already in training, {conflicts} conflicting)"
+    )
     print(f"real folds:      {dict(collections.Counter((e.fold, flag_of(e.label)) for e in real))}")
     print(f"real page labels -> {labels_csv}", flush=True)
 
@@ -367,7 +423,7 @@ def main() -> int:
         print(f"per-page results -> {pred_path}")
 
     if not args.eval_only:
-        train = synth + real * copies
+        train = synth + real * copies + annotated * copies
         model, tok = train_model(train, cfg, device, epochs=epochs, base_model=base_model, tag="final")
         out_dir = ROOT / bc["model_dir"]
         tmp_dir = out_dir.with_name(out_dir.name + ".tmp")
@@ -380,7 +436,12 @@ def main() -> int:
             "base_model": base_model,
             "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "epochs": epochs,
-            "train_pages": {"synthetic": len(synth), "real": len(real), "real_copies": copies},
+            "train_pages": {
+                "synthetic": len(synth),
+                "real": len(real),
+                "annotated": len(annotated),
+                "real_copies": copies,
+            },
             "eval": {k: {kk: v[kk] for kk in ("pages", "keep_pages_lost", "junk_or_blank_caught",
                                                "junk_or_blank_pages", "junk_subtype_correct", "junk_subtype_checked")}
                      for k, v in report["runs"].items()},

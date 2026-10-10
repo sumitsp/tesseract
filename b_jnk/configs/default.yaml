@@ -71,6 +71,7 @@ bert:
   base_model: distilbert-base-uncased
   model_dir: models/bert_page
   synthetic_clean: synthetic/checked/clean.jsonl
+  annotated_jsonl: data/raw/annotated_pages.jsonl
   max_length: 512
   head_share: 0.75       # share of tokens kept from the start of long pages; rest from the end
   epochs: 4

@@ -53,6 +53,7 @@
     "base_model": "distilbert-base-uncased",
     "model_dir": "models/bert_page",
     "synthetic_clean": "synthetic/checked/clean.jsonl",
+    "annotated_jsonl": "data/raw/annotated_pages.jsonl",
     "max_length": 512,
     "head_share": 0.75,
     "epochs": 4,
